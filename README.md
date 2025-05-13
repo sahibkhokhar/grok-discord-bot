@@ -64,3 +64,5 @@ this discord bot replicates the grok mention account on twitter to give AI respo
     *example:* `@YourBotName is the statement in the original message accurate according to current knowledge?`
 
 the bot will then process the original message and your question using the grok api and post a reply.
+
+by default, @ing the bot will check the last 10 messages and then replying to a message and @ing the bot will just take that message as the context.
