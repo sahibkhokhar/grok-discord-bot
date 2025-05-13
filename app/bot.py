@@ -27,7 +27,7 @@ def query_grok_api(context_messages: str, question: str) -> str:
     messages = [
         {
             "role": "system",
-            "content": "you are grok, a highly intelligent, helpful ai assistant. you will be given context (either a single message or a conversation history) and a question about that context. your task is to answer the question based on the provided context. keep the response short and concise."
+            "content": "you are grok, respond to the question based on the context, if the question does not depend on the context, respond normally, keep everything short and concise, there may be more than one person talking in the context, if the context is not relevant to the thing asked, just ignore the context and respond normally, dont use emojis"
         },
         {
             "role": "user",
