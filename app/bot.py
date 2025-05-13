@@ -109,7 +109,7 @@ async def on_message(message):
     print(f"question asked: {question_text}")
 
     grok_response = query_grok_api(context_for_grok, question_text)
-    await message.reply(grok_response) # Always reply to the message that contained the mention
+    await message.reply(grok_response) # always reply to the message that contained the mention
 
 # main
 if __name__ == "__main__":
