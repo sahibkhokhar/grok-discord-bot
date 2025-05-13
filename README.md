@@ -1,4 +1,4 @@
-# grok bot like on twitter!
+# grok bot like on twitter! but on discord!
 
 this discord bot replicates the grok mention account on twitter to give AI responses to messages in discord servers.
 
