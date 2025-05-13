@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  discord-grok-bot:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: discord-grok-bot
+    env_file:
+      - .env
+    restart: unless-stopped
