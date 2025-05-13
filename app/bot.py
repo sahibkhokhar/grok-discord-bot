@@ -34,7 +34,7 @@ def query_grok_api(context_messages: str, question: str) -> str:
             "content": f"context:\n\"\"{context_messages}\"\"\n\nquestion: \"{question}\""
         }
     ]
-    # send the messages (you can change the model in here (grok-3-mini-beta is the cheapest at the moment)
+    # send the messages (you can change the model in here (grok-3-mini-beta is the cheapest at the moment))
     try:
         completion = grok_client.chat.completions.create(
             model="grok-3-mini-beta",
