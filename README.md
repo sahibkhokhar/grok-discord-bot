@@ -19,7 +19,7 @@ this discord bot replicates the grok mention account on twitter to give AI respo
     *   replace `your_discord_bot_token_here` with your actual discord bot token.
     *   replace `your_grok_api_key_here` with your actual grok api key.
 
-3.  **install dependencies:**
+3.  **install dependencies (skip if using docker):**
     open your terminal or command prompt in the project directory and install the required python libraries:
     ```bash
     pip install -r requirements.txt
