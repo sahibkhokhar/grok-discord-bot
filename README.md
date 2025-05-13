@@ -6,8 +6,8 @@ this discord bot replicates the grok mention account on twitter to give AI respo
 
 1.  **clone the repository (or download files):**
     ```bash
-    git clone <repository_url>
-    cd <repository_directory>
+    git clone https://github.com/sahibkhokhar/grok-discord-bot.git
+    cd grok-discord-bot
     ```
 
 2.  **create a `.env` file:**
