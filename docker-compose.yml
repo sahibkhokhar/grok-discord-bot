@@ -5,7 +5,7 @@ services:
     build:
       context: ./app
       dockerfile: Dockerfile
-    container_name: discord-grok-bot
+    container_name: discord-grok-bot-2
     env_file:
       - .env
     restart: unless-stopped

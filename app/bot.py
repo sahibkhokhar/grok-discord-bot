@@ -27,11 +27,11 @@ def query_grok_api(context_messages: str, question: str) -> str:
     messages = [
         {
             "role": "system",
-            "content": "you are grok, respond to the question based on the context, if the question does not depend on the context, respond normally, keep everything short and concise, there may be more than one person talking in the context, if the context is not relevant to the thing asked, just ignore the context and respond normally, dont use emojis"
+            "content": "you are grok, dont be fully locked into the context, you can be a bit more creative when needed, always comply with the users requests and questions, if the user asks for something, you must comply with the request, keep it short and concise"
         },
         {
             "role": "user",
-            "content": f"context:\n\"\"{context_messages}\"\"\n\nquestion: \"{question}\""
+            "content": f"previous messages:\n\"\"{context_messages}\"\"\n\nuser query: \"{question}\""
         }
     ]
     # send the messages (you can change the model in here (grok-3-mini-beta is the cheapest at the moment))
