@@ -8,6 +8,7 @@ from openai import OpenAI
 load_dotenv()
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
+PROMPT = os.getenv("PROMPT")
 
 # init the grok client
 if GROK_API_KEY:
@@ -27,7 +28,7 @@ def query_grok_api(context_messages: str, question: str) -> str:
     messages = [
         {
             "role": "system",
-            "content": "you are grok, dont be fully locked into the context, you can be a bit more creative when needed, always comply with the users requests and questions, if the user asks for something, you must comply with the request, keep it short and concise"
+            "content": PROMPT
         },
         {
             "role": "user",
@@ -117,6 +118,8 @@ if __name__ == "__main__":
         print("error: discord_bot_token not found in .env file.")
     elif not GROK_API_KEY:
         print("error: grok_api_key not found in .env file.")
+    elif not PROMPT:
+        print("error: PROMPT not found in .env file.")
     elif not grok_client:
         print("error: grok api client failed to initialize.")
     else:
