@@ -101,6 +101,9 @@ async def on_message(message):
         if history_messages:
             history_messages.reverse()
             context_for_grok = "\n".join(history_messages)
+            # Truncate context to 1500 characters to avoid overly long prompts
+            if len(context_for_grok) > 1500:
+                context_for_grok = context_for_grok[-1500:]
             print(f"fetched {len(history_messages)} messages for context.")
         else:
             context_for_grok = "no previous messages found in this channel to use as context."
@@ -110,6 +113,9 @@ async def on_message(message):
     print(f"question asked: {question_text}")
 
     grok_response = query_grok_api(context_for_grok, question_text)
+    # Truncate response to 2000 characters for Discord
+    if len(grok_response) > 2000:
+        grok_response = grok_response[:2000]
     await message.reply(grok_response) # always reply to the message that contained the mention
 
 # main
