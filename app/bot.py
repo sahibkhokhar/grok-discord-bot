@@ -83,6 +83,9 @@ async def on_message(message):
         await message.reply(f"it looks like you mentioned me but didn't ask a question after it!")
         return
 
+    # Add the author's name to the question text
+    question_text = f"{message.author.name} asks: {question_text}"
+
     await message.channel.typing()
 
     if message.reference and message.reference.resolved:
