@@ -39,25 +39,24 @@ def query_grok_api(context_messages: str, question: str) -> str:
             "content": f"previous messages:\n\"\"{context_messages}\"\"\n\nuser query: \"{question}\""
         }
     ]
-    # send the messages (you can change the model in here (grok-3-mini-beta is the cheapest at the moment))
-    try:
-        # Prepare search parameters if enabled
-        search_params = None
-        if SEARCH_ENABLED:
-            search_params = {
-                "mode": SEARCH_MODE,
-                "max_search_results": MAX_SEARCH_RESULTS,
-                "sources": [
-                    {"type": "web", "safe_search": True},
-                    {"type": "news", "safe_search": True}
-                ],
-                "return_citations": True
-            }
 
+    # Prepare the payload
+    payload = {
+        "messages": messages,
+        "model": MODEL,
+    }
+
+    # Add search parameters if enabled
+    if SEARCH_ENABLED:
+        payload["search_parameters"] = {
+            "mode": SEARCH_MODE,
+            "return_citations": True
+        }
+
+    # send the messages
+    try:
         completion = grok_client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            search_parameters=search_params,
+            **payload,
             timeout=45
         )
         if completion.choices and completion.choices[0].message:
