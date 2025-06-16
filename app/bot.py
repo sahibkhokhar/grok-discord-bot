@@ -11,7 +11,6 @@ GROK_API_KEY = os.getenv("GROK_API_KEY")
 PROMPT = os.getenv("PROMPT")
 MODEL = os.getenv("MODEL")
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "false").lower() == "true"
-SEARCH_MODE = os.getenv("SEARCH_MODE", "auto")
 MAX_SEARCH_RESULTS = int(os.getenv("MAX_SEARCH_RESULTS", "5"))
 SHOW_SOURCES = os.getenv("SHOW_SOURCES", "true").lower() == "true"
 
@@ -44,14 +43,15 @@ def query_grok_api(context_messages: str, question: str) -> str:
         "model": MODEL,
     }
 
-    # Add search parameters if enabled
-    if SEARCH_ENABLED:
+    # Add search parameters if enabled and "web" is mentioned in the question
+    if SEARCH_ENABLED and "web" in question.lower():
         payload["search_parameters"] = {
-            "mode": SEARCH_MODE,
+            "mode": "on",
             "max_search_results": MAX_SEARCH_RESULTS,
             "sources": [
                 {"type": "web", "safe_search": True},
-                {"type": "news", "safe_search": True}
+                {"type": "news", "safe_search": True},
+                {"type": "x"}
             ],
             "return_citations": True
         }
@@ -67,7 +67,7 @@ def query_grok_api(context_messages: str, question: str) -> str:
             response_content = response_data["choices"][0]["message"].get("content", "no content in response.")
             
             # Add citations if they exist and search was used
-            if SEARCH_ENABLED and SHOW_SOURCES and response_data.get("citations"):
+            if SEARCH_ENABLED and SHOW_SOURCES and "web" in question.lower() and response_data.get("citations"):
                 citations = response_data["citations"]
                 if citations:
                     response_content += "\n\nSources:"
