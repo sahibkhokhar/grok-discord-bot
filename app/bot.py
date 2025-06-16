@@ -13,6 +13,7 @@ MODEL = os.getenv("MODEL")
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "false").lower() == "true"
 SEARCH_MODE = os.getenv("SEARCH_MODE", "auto")
 MAX_SEARCH_RESULTS = int(os.getenv("MAX_SEARCH_RESULTS", "5"))
+SHOW_SOURCES = os.getenv("SHOW_SOURCES", "true").lower() == "true"
 
 # query the grok api
 def query_grok_api(context_messages: str, question: str) -> str:
@@ -66,7 +67,7 @@ def query_grok_api(context_messages: str, question: str) -> str:
             response_content = response_data["choices"][0]["message"].get("content", "no content in response.")
             
             # Add citations if they exist and search was used
-            if SEARCH_ENABLED and response_data.get("citations"):
+            if SEARCH_ENABLED and SHOW_SOURCES and response_data.get("citations"):
                 citations = response_data["citations"]
                 if citations:
                     response_content += "\n\nSources:"
