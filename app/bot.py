@@ -10,7 +10,6 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 PROMPT = os.getenv("PROMPT")
 MODEL = os.getenv("MODEL")
-REASONING_EFFORT = os.getenv("REASONING_EFFORT")
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "false").lower() == "true"
 SEARCH_MODE = os.getenv("SEARCH_MODE", "auto")
 MAX_SEARCH_RESULTS = int(os.getenv("MAX_SEARCH_RESULTS", "5"))
@@ -51,18 +50,28 @@ def query_grok_api(context_messages: str, question: str) -> str:
                 "sources": [
                     {"type": "web", "safe_search": True},
                     {"type": "news", "safe_search": True}
-                ]
+                ],
+                "return_citations": True
             }
 
         completion = grok_client.chat.completions.create(
             model=MODEL,
             messages=messages,
-            reasoning_effort=REASONING_EFFORT,
             search_parameters=search_params,
             timeout=45
         )
         if completion.choices and completion.choices[0].message:
-            return completion.choices[0].message.content or "no content in response."
+            response_content = completion.choices[0].message.content or "no content in response."
+            
+            # Add citations if they exist and search was used
+            if SEARCH_ENABLED and hasattr(completion, 'citations') and completion.citations:
+                citations = completion.citations
+                if citations:
+                    response_content += "\n\nSources:"
+                    for i, citation in enumerate(citations, 1):
+                        response_content += f"\n{i}. {citation}"
+            
+            return response_content
         else:
             return "error: could not parse grok api response (no choices or message)."
     except Exception as e:
