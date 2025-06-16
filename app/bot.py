@@ -10,6 +10,7 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 PROMPT = os.getenv("PROMPT")
 MODEL = os.getenv("MODEL")
+REASONING_EFFORT = os.getenv("REASONING_EFFORT")
 
 # init the grok client
 if GROK_API_KEY:
@@ -41,6 +42,7 @@ def query_grok_api(context_messages: str, question: str) -> str:
         completion = grok_client.chat.completions.create(
             model=MODEL,
             messages=messages,
+            reasoning_effort=REASONING_EFFORT,
             timeout=45
         )
         if completion.choices and completion.choices[0].message:
