@@ -11,6 +11,9 @@ GROK_API_KEY = os.getenv("GROK_API_KEY")
 PROMPT = os.getenv("PROMPT")
 MODEL = os.getenv("MODEL")
 REASONING_EFFORT = os.getenv("REASONING_EFFORT")
+SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "false").lower() == "true"
+SEARCH_MODE = os.getenv("SEARCH_MODE", "auto")
+MAX_SEARCH_RESULTS = int(os.getenv("MAX_SEARCH_RESULTS", "5"))
 
 # init the grok client
 if GROK_API_KEY:
@@ -39,10 +42,23 @@ def query_grok_api(context_messages: str, question: str) -> str:
     ]
     # send the messages (you can change the model in here (grok-3-mini-beta is the cheapest at the moment))
     try:
+        # Prepare search parameters if enabled
+        search_params = None
+        if SEARCH_ENABLED:
+            search_params = {
+                "mode": SEARCH_MODE,
+                "max_search_results": MAX_SEARCH_RESULTS,
+                "sources": [
+                    {"type": "web", "safe_search": True},
+                    {"type": "news", "safe_search": True}
+                ]
+            }
+
         completion = grok_client.chat.completions.create(
             model=MODEL,
             messages=messages,
             reasoning_effort=REASONING_EFFORT,
+            search_parameters=search_params,
             timeout=45
         )
         if completion.choices and completion.choices[0].message:
