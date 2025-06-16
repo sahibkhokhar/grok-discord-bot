@@ -1,8 +1,8 @@
 import discord
 import os
 import re
+import requests
 from dotenv import load_dotenv
-from openai import OpenAI
 
 # load env variables
 load_dotenv()
@@ -14,19 +14,16 @@ SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "false").lower() == "true"
 SEARCH_MODE = os.getenv("SEARCH_MODE", "auto")
 MAX_SEARCH_RESULTS = int(os.getenv("MAX_SEARCH_RESULTS", "5"))
 
-# init the grok client
-if GROK_API_KEY:
-    grok_client = OpenAI(
-        api_key=GROK_API_KEY,
-        base_url="https://api.x.ai/v1",
-    )
-else:
-    grok_client = None
-
 # query the grok api
 def query_grok_api(context_messages: str, question: str) -> str:
-    if not grok_client:
-        return "error: grok_api_key is not configured or client failed to initialize."
+    if not GROK_API_KEY:
+        return "error: grok_api_key is not configured."
+
+    url = "https://api.x.ai/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {GROK_API_KEY}"
+    }
 
     # define the messages sent to the api
     messages = [
@@ -50,21 +47,27 @@ def query_grok_api(context_messages: str, question: str) -> str:
     if SEARCH_ENABLED:
         payload["search_parameters"] = {
             "mode": SEARCH_MODE,
+            "max_search_results": MAX_SEARCH_RESULTS,
+            "sources": [
+                {"type": "web", "safe_search": True},
+                {"type": "news", "safe_search": True}
+            ],
             "return_citations": True
         }
 
-    # send the messages
+    # send the request
     try:
-        completion = grok_client.chat.completions.create(
-            **payload,
-            timeout=45
-        )
-        if completion.choices and completion.choices[0].message:
-            response_content = completion.choices[0].message.content or "no content in response."
+        response = requests.post(url, headers=headers, json=payload, timeout=45)
+        response.raise_for_status()
+        
+        response_data = response.json()
+        
+        if response_data.get("choices") and response_data["choices"][0].get("message"):
+            response_content = response_data["choices"][0]["message"].get("content", "no content in response.")
             
             # Add citations if they exist and search was used
-            if SEARCH_ENABLED and hasattr(completion, 'citations') and completion.citations:
-                citations = completion.citations
+            if SEARCH_ENABLED and response_data.get("citations"):
+                citations = response_data["citations"]
                 if citations:
                     response_content += "\n\nSources:"
                     for i, citation in enumerate(citations, 1):
@@ -73,6 +76,8 @@ def query_grok_api(context_messages: str, question: str) -> str:
             return response_content
         else:
             return "error: could not parse grok api response (no choices or message)."
+    except requests.exceptions.RequestException as e:
+        return f"error communicating with grok api: {e}"
     except Exception as e:
         return f"error communicating with grok api: {e}"
 
@@ -153,8 +158,6 @@ if __name__ == "__main__":
         print("error: grok_api_key not found in .env file.")
     elif not PROMPT:
         print("error: PROMPT not found in .env file.")
-    elif not grok_client:
-        print("error: grok api client failed to initialize.")
     else:
         try:
             client.run(DISCORD_BOT_TOKEN)
