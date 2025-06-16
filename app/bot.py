@@ -9,6 +9,7 @@ load_dotenv()
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 PROMPT = os.getenv("PROMPT")
+MODEL = os.getenv("MODEL")
 
 # init the grok client
 if GROK_API_KEY:
@@ -38,7 +39,7 @@ def query_grok_api(context_messages: str, question: str) -> str:
     # send the messages (you can change the model in here (grok-3-mini-beta is the cheapest at the moment))
     try:
         completion = grok_client.chat.completions.create(
-            model="grok-3",
+            model=MODEL,
             messages=messages,
             timeout=45
         )
@@ -104,9 +105,6 @@ async def on_message(message):
         if history_messages:
             history_messages.reverse()
             context_for_grok = "\n".join(history_messages)
-            # Truncate context to 1500 characters to avoid overly long prompts
-            if len(context_for_grok) > 1500:
-                context_for_grok = context_for_grok[-1500:]
             print(f"fetched {len(history_messages)} messages for context.")
         else:
             context_for_grok = "no previous messages found in this channel to use as context."
