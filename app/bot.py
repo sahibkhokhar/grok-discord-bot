@@ -66,6 +66,10 @@ def query_grok_api(context_messages: str, question: str) -> str:
         if response_data.get("choices") and response_data["choices"][0].get("message"):
             response_content = response_data["choices"][0]["message"].get("content", "no content in response.")
             
+            # Add "searched online" indicator if search was used
+            if SEARCH_ENABLED and "web" in question.lower():
+                response_content += "\n\n*searched online for resources*"
+            
             # Add citations if they exist and search was used
             if SEARCH_ENABLED and SHOW_SOURCES and "web" in question.lower() and response_data.get("citations"):
                 citations = response_data["citations"]
