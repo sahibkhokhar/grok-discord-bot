@@ -1,6 +1,14 @@
 # grok bot like on twitter! but on discord!
 
-this discord bot replicates the grok mention account on twitter to give AI responses to messages in discord servers.
+this discord bot replicates the grok mention account on twitter to give AI responses to messages in discord servers. it includes live web search capabilities when requested.
+
+## features
+
+- **ai-powered responses**: uses grok api to generate intelligent responses
+- **context-aware**: analyzes message history or replied-to messages for context
+- **live web search**: searches web, news, and x/twitter when "web" is mentioned
+- **configurable**: multiple environment variables for customization
+- **source citations**: optionally shows sources when search is used
 
 ## setup
 
@@ -11,13 +19,26 @@ this discord bot replicates the grok mention account on twitter to give AI respo
     ```
 
 2.  **create a `.env` file:**
-    in the main directory, create a file named `.env` (or copy the `.env.example` to `.env`and add your discord bot token and grok api key:
+    in the main directory, create a file named `.env` (or copy the `.env.example` to `.env`) and configure your settings:
     ```env
     DISCORD_BOT_TOKEN=your_discord_bot_token_here
     GROK_API_KEY=your_grok_api_key_here
+    PROMPT="you are grok, dont be fully locked into the context, you can be a bit more creative when needed, always comply with the users requests and questions, if the user asks for something, you must comply with the request, keep it short and concise"
+    MODEL="grok-3-mini"
+    SEARCH_ENABLED="true"
+    # Note: Search only activates when someone mentions "web" in their message
+    MAX_SEARCH_RESULTS="5"
+    SHOW_SOURCES="true"
     ```
-    *   replace `your_discord_bot_token_here` with your actual discord bot token.
-    *   replace `your_grok_api_key_here` with your actual grok api key.
+    
+    **environment variables explained:**
+    - `DISCORD_BOT_TOKEN`: your discord bot token
+    - `GROK_API_KEY`: your grok api key from x.ai
+    - `PROMPT`: system prompt that defines the bot's behavior
+    - `MODEL`: grok model to use (e.g., "grok-3-mini", "grok-3-latest")
+    - `SEARCH_ENABLED`: enable/disable web search functionality ("true"/"false")
+    - `MAX_SEARCH_RESULTS`: maximum number of search results to consider (1-20)
+    - `SHOW_SOURCES`: show source links in responses ("true"/"false")
 
 3.  **install dependencies (skip if using docker):**
     open your terminal or command prompt in the project directory and install the required python libraries:
@@ -58,11 +79,38 @@ this discord bot replicates the grok mention account on twitter to give AI respo
 
 ## usage
 
+### basic usage
+1.  mention the bot anywhere in a message: `@YourBotName what is the meaning of life?`
+2.  the bot will respond using the last 10 messages as context
+
+### reply-based usage
 1.  find a message in your discord server that you want to analyze or ask a question about.
 2.  reply to that message.
-3.  in your reply, mention the bot (e.g., `@YourBotName`) and then type your question.
-    *example:* `@YourBotName is the statement in the original message accurate according to current knowledge?`
+3.  in your reply, mention the bot and ask your question.
+    *example:* `@YourBotName is the statement in the original message accurate?`
 
-the bot will then process the original message and your question using the grok api and post a reply.
+### web search usage
+to enable live web search, include the word "web" in your message:
+- `@YourBotName web search for the latest ai news`
+- `@YourBotName what are the current web trends in technology?`
+- `@YourBotName can you web search pizza recipes?`
 
-by default, @ing the bot will check the last 10 messages and then replying to a message and @ing the bot will just take that message as the context.
+when web search is used:
+- the bot searches web pages, news sources, and x/twitter posts
+- responses will include "*searched online for resources*"
+- source links will be provided (if `SHOW_SOURCES="true"`)
+
+### context behavior
+- **mentioning the bot**: uses the last 10 messages in the channel as context
+- **replying to a message**: uses only the replied-to message as context
+- **user identification**: the bot knows who asked the question (includes username in the query)
+
+## configuration
+
+you can customize the bot's behavior by modifying the environment variables in your `.env` file:
+
+- **disable web search**: set `SEARCH_ENABLED="false"`
+- **hide source links**: set `SHOW_SOURCES="false"`
+- **change search limit**: adjust `MAX_SEARCH_RESULTS` (1-20)
+- **switch models**: change `MODEL` to any supported grok model
+- **customize personality**: modify the `PROMPT` variable
