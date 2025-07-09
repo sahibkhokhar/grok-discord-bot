@@ -1,12 +1,13 @@
 # grok bot like on twitter! but on discord!
 
-this discord bot replicates the grok mention account on twitter to give AI responses to messages in discord servers. it includes live web search capabilities when requested.
+this discord bot replicates the grok mention account on twitter to give AI responses to messages in discord servers. it includes live web search capabilities when requested and image generation with user restrictions.
 
 ## features
 
 - **ai-powered responses**: uses grok api to generate intelligent responses
 - **context-aware**: analyzes message history or replied-to messages for context
 - **live web search**: searches web, news, and x/twitter when "web" is mentioned
+- **image generation**: creates images using grok's image generation model when "image" is mentioned (restricted to authorized users only)
 - **configurable**: multiple environment variables for customization
 - **source citations**: optionally shows sources when search is used
 
@@ -29,6 +30,9 @@ this discord bot replicates the grok mention account on twitter to give AI respo
     # Note: Search only activates when someone mentions "web" in their message
     MAX_SEARCH_RESULTS="5"
     SHOW_SOURCES="true"
+    # Image generation settings
+    IMAGE_GEN_ENABLED="true"
+    ALLOWED_IMAGE_USERS="374703513315442691,another_user_id,yet_another_user_id"
     ```
     
     **environment variables explained:**
@@ -39,6 +43,8 @@ this discord bot replicates the grok mention account on twitter to give AI respo
     - `SEARCH_ENABLED`: enable/disable web search functionality ("true"/"false")
     - `MAX_SEARCH_RESULTS`: maximum number of search results to consider (1-20)
     - `SHOW_SOURCES`: show source links in responses ("true"/"false")
+    - `IMAGE_GEN_ENABLED`: enable/disable image generation functionality ("true"/"false")
+    - `ALLOWED_IMAGE_USERS`: comma-separated list of user IDs allowed to use image generation
 
 3.  **install dependencies (skip if using docker):**
     open your terminal or command prompt in the project directory and install the required python libraries:
@@ -100,6 +106,19 @@ when web search is used:
 - responses will include "*searched online for resources*"
 - source links will be provided (if `SHOW_SOURCES="true"`)
 
+### image generation usage
+to generate images, include the word "image" in your message (restricted to authorized users only):
+- `@YourBotName image a cat sitting on a rainbow`
+- `@YourBotName image cyberpunk cityscape at night`
+- `@YourBotName image abstract art with geometric shapes`
+
+when image generation is used:
+- only users listed in `ALLOWED_IMAGE_USERS` can use this feature
+- unauthorized users will receive a "not allowed" message
+- the bot will show both your original prompt and the AI-revised prompt
+- the generated image will be displayed in an embedded format
+- each image costs $0.07 to generate through the xAI API
+
 ### context behavior
 - **mentioning the bot**: uses the last 10 messages in the channel as context
 - **replying to a message**: uses only the replied-to message as context
@@ -114,3 +133,5 @@ you can customize the bot's behavior by modifying the environment variables in y
 - **change search limit**: adjust `MAX_SEARCH_RESULTS` (1-20)
 - **switch models**: change `MODEL` to any supported grok model
 - **customize personality**: modify the `PROMPT` variable
+- **disable image generation**: set `IMAGE_GEN_ENABLED="false"`
+- **modify image access**: update `ALLOWED_IMAGE_USERS` with comma-separated user IDs
