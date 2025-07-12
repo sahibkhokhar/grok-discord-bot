@@ -1,5 +1,4 @@
 discord.py
 python-dotenv
-requests
-openai
+httpx
 xai-sdk

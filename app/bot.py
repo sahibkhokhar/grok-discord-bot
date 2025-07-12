@@ -1,7 +1,10 @@
 import discord
 import os
 import re
-import requests
+import httpx
+import asyncio
+import json
+import time
 from dotenv import load_dotenv
 from xai_sdk import Client
 
@@ -14,6 +17,8 @@ MODEL = os.getenv("MODEL")
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "false").lower() == "true"
 MAX_SEARCH_RESULTS = int(os.getenv("MAX_SEARCH_RESULTS", "5"))
 SHOW_SOURCES = os.getenv("SHOW_SOURCES", "true").lower() == "true"
+WORD_CHUNK_SIZE = int(os.getenv("WORD_CHUNK_SIZE", "12"))
+EDIT_COOLDOWN_SECONDS = float(os.getenv("EDIT_COOLDOWN_SECONDS", "1.5"))
 # Image generation settings
 IMAGE_GEN_ENABLED = os.getenv("IMAGE_GEN_ENABLED", "true").lower() == "true"
 ALLOWED_IMAGE_USERS = os.getenv("ALLOWED_IMAGE_USERS", "").split(",") if os.getenv("ALLOWED_IMAGE_USERS") else []
@@ -43,9 +48,13 @@ def generate_image(prompt: str) -> dict:
         return {"error": f"Error generating image: {str(e)}"}
 
 # query the grok api
-def query_grok_api(context_messages: str, question: str) -> str:
+async def query_grok_api_stream(context_messages: str, question: str):
+    """
+    Asynchronously queries the Grok API with streaming enabled and yields content chunks.
+    """
     if not GROK_API_KEY:
-        return "error: grok_api_key is not configured."
+        yield "error: grok_api_key is not configured."
+        return
 
     url = "https://api.x.ai/v1/chat/completions"
     headers = {
@@ -69,6 +78,7 @@ def query_grok_api(context_messages: str, question: str) -> str:
     payload = {
         "messages": messages,
         "model": MODEL,
+        "stream": True,
     }
 
     # Add search parameters if enabled and "web" is mentioned in the question
@@ -84,35 +94,28 @@ def query_grok_api(context_messages: str, question: str) -> str:
             "return_citations": True
         }
 
-    # send the request
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=45)
-        response.raise_for_status()
-        
-        response_data = response.json()
-        
-        if response_data.get("choices") and response_data["choices"][0].get("message"):
-            response_content = response_data["choices"][0]["message"].get("content", "no content in response.")
-            
-            # Add "searched online" indicator if search was used
-            if SEARCH_ENABLED and "web" in question.lower():
-                response_content += "\n\n*searched online for resources*"
-            
-            # Add citations if they exist and search was used
-            if SEARCH_ENABLED and SHOW_SOURCES and "web" in question.lower() and response_data.get("citations"):
-                citations = response_data["citations"]
-                if citations:
-                    response_content += "\n\nSources:"
-                    for i, citation in enumerate(citations, 1):
-                        response_content += f"\n{i}. {citation}"
-            
-            return response_content
-        else:
-            return "error: could not parse grok api response (no choices or message)."
-    except requests.exceptions.RequestException as e:
-        return f"error communicating with grok api: {e}"
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            async with client.stream("POST", url, headers=headers, json=payload) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line.startswith('data: '):
+                        data_str = line[6:]
+                        if data_str.strip() == '[DONE]':
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            if chunk.get("choices") and chunk["choices"][0].get("delta"):
+                                content = chunk["choices"][0]["delta"].get("content")
+                                if content:
+                                    yield content
+                        except (json.JSONDecodeError, IndexError, KeyError):
+                            print(f"Could not parse chunk from stream: {data_str}")
+                            continue
+    except httpx.RequestError as e:
+        yield f"error communicating with grok api: {e}"
     except Exception as e:
-        return f"error communicating with grok api: {e}"
+        yield f"error communicating with grok api: {e}"
 
 # setup the discord client
 intents = discord.Intents.default()
@@ -185,10 +188,8 @@ async def on_message(message):
         await message.reply(embed=embed)
         return
 
-    # Add the author's name to the question text for regular chat
+    # Add the author's name to the question text
     question_text = f"{message.author.name} asks: {question_text}"
-
-    await message.channel.typing()
 
     if message.reference and message.reference.resolved:
         # if a reply, use the message that was replied to as the context
@@ -214,11 +215,46 @@ async def on_message(message):
     print(f"context to be sent to grok api:\n{context_for_grok}")
     print(f"question asked: {question_text}")
 
-    grok_response = query_grok_api(context_for_grok, question_text)
-    # Truncate response to 2000 characters for Discord
-    if len(grok_response) > 2000:
-        grok_response = grok_response[:2000]
-    await message.reply(grok_response) # always reply to the message that contained the mention
+    # --- Streaming Response Logic ---
+    sent_message = None
+    full_response = ""
+    current_chunk = ""
+    last_edit_time = 0
+
+    try:
+        # Send initial message
+        sent_message = await message.reply("🧠 Thinking...")
+
+        async for chunk in query_grok_api_stream(context_for_grok, question_text):
+            full_response += chunk
+            current_chunk += chunk
+
+            # Edit message in word chunks to simulate streaming
+            if len(current_chunk.split()) >= WORD_CHUNK_SIZE and (time.time() - last_edit_time) > EDIT_COOLDOWN_SECONDS:
+                if len(full_response) > 1990: # Leave some buffer
+                     await sent_message.edit(content=full_response[:1990] + "...")
+                     break # Stop streaming if message is too long
+                
+                await sent_message.edit(content=full_response + "...")
+                current_chunk = ""
+                last_edit_time = time.time()
+                
+        # Final edit with the complete message
+        if sent_message:
+            final_content = full_response
+            if len(final_content) > 2000:
+                final_content = final_content[:2000]
+            
+            # If the message is empty (e.g., an error occurred early)
+            if not final_content.strip():
+                 final_content = "I am sorry, I encountered an error and could not provide a response."
+
+            await sent_message.edit(content=final_content)
+
+    except Exception as e:
+        print(f"An error occurred during streaming: {e}")
+        if sent_message:
+            await sent_message.edit(content="An error occurred while generating the response.")
 
 # main
 if __name__ == "__main__":
