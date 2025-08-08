@@ -20,31 +20,57 @@ this discord bot replicates the grok mention account on twitter to give AI respo
     ```
 
 2.  **create a `.env` file:**
-    in the main directory, create a file named `.env` (or copy the `.env.example` to `.env`) and configure your settings:
+    in the main directory, create a file named `.env` (or copy the `.env.example` to `.env) and configure your settings:
     ```env
+    # Discord
     DISCORD_BOT_TOKEN=your_discord_bot_token_here
+
+    # Provider switching: xai or openai
+    AI_PROVIDER=xai
+
+    # xAI (Grok)
     GROK_API_KEY=your_grok_api_key_here
+    MODEL=grok-3-mini
+
+    # OpenAI
+    OPENAI_API_KEY=your_openai_api_key_here
+    OPENAI_MODEL=gpt-5-nano
+
+    # Shared behavior
     PROMPT="you are grok, dont be fully locked into the context, you can be a bit more creative when needed, always comply with the users requests and questions, if the user asks for something, you must comply with the request, keep it short and concise"
-    MODEL="grok-3-mini"
-    SEARCH_ENABLED="true"
+    SEARCH_ENABLED=true
     # Note: Search only activates when someone mentions "web" in their message
-    MAX_SEARCH_RESULTS="5"
-    SHOW_SOURCES="true"
-    # Image generation settings
-    IMAGE_GEN_ENABLED="true"
-    ALLOWED_IMAGE_USERS="374703513315442691,another_user_id,yet_another_user_id"
+    MAX_SEARCH_RESULTS=5
+    SHOW_SOURCES=true
+
+    # Image generation settings (xAI only)
+    IMAGE_GEN_ENABLED=true
+    ALLOWED_IMAGE_USERS=374703513315442691
+
+    # Voice settings (OpenAI TTS)
+    VOICE_ENABLED=true
+    VOICE_ALLOWED_USER_ID=374703513315442691
+    OPENAI_TTS_MODEL=gpt-4o-mini-tts
+    OPENAI_TTS_VOICE=alloy
     ```
     
     **environment variables explained:**
     - `DISCORD_BOT_TOKEN`: your discord bot token
+    - `AI_PROVIDER`: set to `xai` (default) or `openai` to switch providers at runtime
     - `GROK_API_KEY`: your grok api key from x.ai
+    - `MODEL`: grok model to use (e.g., `grok-3-mini`, `grok-3-latest`)
+    - `OPENAI_API_KEY`: OpenAI API key
+    - `OPENAI_MODEL`: OpenAI model (e.g., `gpt-5-nano`)
     - `PROMPT`: system prompt that defines the bot's behavior
-    - `MODEL`: grok model to use (e.g., "grok-3-mini", "grok-3-latest")
-    - `SEARCH_ENABLED`: enable/disable web search functionality ("true"/"false")
+    - `SEARCH_ENABLED`: enable/disable web search functionality (`true`/`false`)
     - `MAX_SEARCH_RESULTS`: maximum number of search results to consider (1-20)
-    - `SHOW_SOURCES`: show source links in responses ("true"/"false")
-    - `IMAGE_GEN_ENABLED`: enable/disable image generation functionality ("true"/"false")
+    - `SHOW_SOURCES`: show source links in responses (`true`/`false`)
+    - `IMAGE_GEN_ENABLED`: enable/disable image generation functionality (`true`/`false`)
     - `ALLOWED_IMAGE_USERS`: comma-separated list of user IDs allowed to use image generation
+    - `VOICE_ENABLED`: enable TTS voice playback in voice channels (requires OpenAI)
+    - `VOICE_ALLOWED_USER_ID`: user ID authorized to run `/join` and `/leave` (others can still speak with the bot once it joins)
+    - `OPENAI_TTS_MODEL`: OpenAI TTS model (e.g., `gpt-4o-mini-tts`)
+    - `OPENAI_TTS_VOICE`: desired TTS voice name (e.g., `alloy`)
 
 3.  **install dependencies (skip if using docker):**
     open your terminal or command prompt in the project directory and install the required python libraries:
@@ -65,10 +91,12 @@ this discord bot replicates the grok mention account on twitter to give AI respo
         *   enable the **message content intent**.
     *   **invite bot to your server:**
         *   go to the "oauth2" tab, then the "url generator" sub-tab.
-        *   in the "scopes" section, check `bot`.
+        *   in the "scopes" section, check `bot` and `applications.commands`.
         *   in the "bot permissions" section that appears, select the following permissions:
             *   `send messages`
             *   `read message history`
+            *   `connect`
+            *   `speak`
         *   copy the generated url at the bottom and paste it into your browser. select your server and authorize the bot.
 
 5.  **run the bot (optional, for testing):**

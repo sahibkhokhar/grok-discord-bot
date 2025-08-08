@@ -4,6 +4,11 @@ FROM python:3.10-slim-bullseye
 # set working directory
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ffmpeg libopus0 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 # copy requirements file
 COPY requirements.txt .
 

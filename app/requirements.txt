@@ -2,3 +2,5 @@ discord.py
 python-dotenv
 httpx
 xai-sdk
+PyNaCl
+openai

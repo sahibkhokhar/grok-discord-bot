@@ -1,32 +1,60 @@
 import discord
+from discord import app_commands
 import os
 import re
 import httpx
 import asyncio
 import json
 import time
+import tempfile
 from dotenv import load_dotenv
 from xai_sdk import Client
+from typing import AsyncGenerator, Optional
+
+try:
+    from openai import OpenAI as OpenAIClient
+except Exception:
+    OpenAIClient = None  # OpenAI is optional depending on provider
 
 # load env variables
 load_dotenv()
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+
+# Provider/config
+AI_PROVIDER = os.getenv("AI_PROVIDER", "xai").lower()  # "xai" or "openai"
+
+# xAI
 GROK_API_KEY = os.getenv("GROK_API_KEY")
+MODEL = os.getenv("MODEL", "grok-3-mini")
+
+# OpenAI
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano")
+
+# Shared behavior
 PROMPT = os.getenv("PROMPT")
-MODEL = os.getenv("MODEL")
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "false").lower() == "true"
 MAX_SEARCH_RESULTS = int(os.getenv("MAX_SEARCH_RESULTS", "5"))
 SHOW_SOURCES = os.getenv("SHOW_SOURCES", "true").lower() == "true"
 WORD_CHUNK_SIZE = int(os.getenv("WORD_CHUNK_SIZE", "12"))
 EDIT_COOLDOWN_SECONDS = float(os.getenv("EDIT_COOLDOWN_SECONDS", "1.5"))
-# Image generation settings
+
+# Image generation settings (xAI only)
 IMAGE_GEN_ENABLED = os.getenv("IMAGE_GEN_ENABLED", "true").lower() == "true"
 ALLOWED_IMAGE_USERS = os.getenv("ALLOWED_IMAGE_USERS", "").split(",") if os.getenv("ALLOWED_IMAGE_USERS") else []
-# Clean up any empty strings and whitespace
 ALLOWED_IMAGE_USERS = [user_id.strip() for user_id in ALLOWED_IMAGE_USERS if user_id.strip()]
+
+# Voice / TTS settings (OpenAI TTS)
+VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
+VOICE_ALLOWED_USER_ID = os.getenv("VOICE_ALLOWED_USER_ID", "374703513315442691")
+OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
+OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "alloy")
 
 # Initialize xAI client for image generation
 xai_client = Client(api_key=GROK_API_KEY) if GROK_API_KEY else None
+
+# Initialize OpenAI client if available
+openai_client = OpenAIClient(api_key=OPENAI_API_KEY) if (OPENAI_API_KEY and OpenAIClient) else None
 
 def is_user_allowed_for_images(user_id: str) -> bool:
     """Check if user is allowed to use image generation"""
@@ -47,8 +75,8 @@ def generate_image(prompt: str) -> dict:
     except Exception as e:
         return {"error": f"Error generating image: {str(e)}"}
 
-# query the grok api
-async def query_grok_api_stream(context_messages: str, question: str):
+# --- AI Querying ---
+async def query_xai_api_stream(context_messages: str, question: str) -> AsyncGenerator[str, None]:
     """
     Asynchronously queries the Grok API with streaming enabled and yields content chunks.
     """
@@ -117,19 +145,161 @@ async def query_grok_api_stream(context_messages: str, question: str):
     except Exception as e:
         yield f"error communicating with grok api: {e}"
 
+
+async def query_openai_api_stream(context_messages: str, question: str) -> AsyncGenerator[str, None]:
+    """Asynchronously queries OpenAI Responses API with optional streaming."""
+    if not openai_client:
+        yield "error: openai client not initialized - check your OPENAI_API_KEY"
+        return
+
+    # Build input using Responses API format
+    user_input = [
+        {
+            "role": "user",
+            "content": f"previous messages:\n\"\"{context_messages}\"\"\n\nuser query: \"{question}\"",
+        }
+    ]
+
+    # We will use streaming events
+    try:
+        stream = openai_client.responses.create(
+            model=OPENAI_MODEL,
+            input=user_input,
+            instructions=PROMPT or "You are a helpful assistant.",
+            stream=True,
+        )
+        for event in stream:  # note: OpenAI SDK yields events synchronously
+            # Bridge synchronous iterator into async generator
+            await asyncio.sleep(0)  # yield to event loop
+            try:
+                if hasattr(event, "type") and event.type == "response.output_text.delta":
+                    delta = getattr(event, "delta", None)
+                    if delta:
+                        yield str(delta)
+                elif hasattr(event, "type") and event.type == "response.completed":
+                    break
+            except Exception:
+                continue
+    except Exception as e:
+        yield f"error communicating with openai api: {e}"
+
+
+async def query_ai_api_stream(context_messages: str, question: str) -> AsyncGenerator[str, None]:
+    """Dispatch to the configured provider."""
+    provider = AI_PROVIDER
+    if provider == "openai":
+        async for chunk in query_openai_api_stream(context_messages, question):
+            yield chunk
+    else:
+        async for chunk in query_xai_api_stream(context_messages, question):
+            yield chunk
+
 # setup the discord client
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
 intents.guilds = True
+intents.voice_states = True
 
 client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
+# Voice connection handle
+voice_lock = asyncio.Lock()
+voice_client: Optional[discord.VoiceClient] = None
+
+
+async def synthesize_and_play(text: str):
+    global voice_client
+    if not VOICE_ENABLED:
+        return
+    if not (voice_client and voice_client.is_connected()):
+        return
+    if not openai_client:
+        print("VOICE_ENABLED but OpenAI client not initialized; skipping TTS")
+        return
+
+    async with voice_lock:
+        # Create temp audio file
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        # Generate TTS via OpenAI (stream to file)
+        try:
+            with openai_client.audio.speech.with_streaming_response.create(
+                model=OPENAI_TTS_MODEL,
+                voice=OPENAI_TTS_VOICE,
+                input=text[:4000],  # basic limit for TTS prompt length
+            ) as response:
+                response.stream_to_file(tmp_path)
+        except Exception as e:
+            print(f"TTS error: {e}")
+            return
+
+        # Play in discord via ffmpeg
+        if voice_client and voice_client.is_connected():
+            if voice_client.is_playing():
+                # wait for current to finish
+                while voice_client.is_playing():
+                    await asyncio.sleep(0.25)
+            source = discord.FFmpegPCMAudio(tmp_path)
+            voice_client.play(source)
+            while voice_client.is_playing():
+                await asyncio.sleep(0.25)
 
 # on ready event
 @client.event
 async def on_ready():
     print(f'we have logged in as {client.user} (id: {client.user.id})')
     print(f"bot is ready and listening for mentions.")
+    try:
+        await tree.sync()
+        print("Slash commands synced.")
+    except Exception as e:
+        print(f"Failed to sync commands: {e}")
+
+
+@tree.command(name="join", description="Have the bot join your current voice channel (restricted)")
+async def join(interaction: discord.Interaction):
+    global voice_client
+    if str(interaction.user.id) != VOICE_ALLOWED_USER_ID:
+        await interaction.response.send_message("You are not allowed to use this command.", ephemeral=True)
+        return
+
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("Cannot resolve your voice state.", ephemeral=True)
+        return
+
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        await interaction.response.send_message("You must be connected to a voice channel.", ephemeral=True)
+        return
+
+    channel = interaction.user.voice.channel
+    try:
+        if voice_client and voice_client.is_connected():
+            if voice_client.channel.id == channel.id:
+                await interaction.response.send_message(f"Already connected to {channel.name}.", ephemeral=True)
+                return
+            await voice_client.move_to(channel)
+        else:
+            voice_client = await channel.connect()
+        await interaction.response.send_message(f"Joined {channel.name}.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"Failed to join: {e}", ephemeral=True)
+
+
+@tree.command(name="leave", description="Have the bot leave the current voice channel")
+async def leave(interaction: discord.Interaction):
+    global voice_client
+    if not voice_client or not voice_client.is_connected():
+        await interaction.response.send_message("I'm not connected to a voice channel.", ephemeral=True)
+        return
+    try:
+        await voice_client.disconnect(force=True)
+        voice_client = None
+        await interaction.response.send_message("Left the voice channel.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"Failed to leave: {e}", ephemeral=True)
 
 # on message event
 @client.event
@@ -225,7 +395,7 @@ async def on_message(message):
         # Send initial message
         sent_message = await message.reply("🧠 Thinking...")
 
-        async for chunk in query_grok_api_stream(context_for_grok, question_text):
+        async for chunk in query_ai_api_stream(context_for_grok, question_text):
             full_response += chunk
             current_chunk += chunk
 
@@ -250,6 +420,11 @@ async def on_message(message):
                  final_content = "I am sorry, I encountered an error and could not provide a response."
 
             await sent_message.edit(content=final_content)
+            # Also speak in voice if connected and OpenAI TTS available
+            try:
+                await synthesize_and_play(final_content)
+            except Exception as e:
+                print(f"Voice playback error: {e}")
 
     except Exception as e:
         print(f"An error occurred during streaming: {e}")
@@ -260,10 +435,12 @@ async def on_message(message):
 if __name__ == "__main__":
     if not DISCORD_BOT_TOKEN:
         print("error: discord_bot_token not found in .env file.")
-    elif not GROK_API_KEY:
-        print("error: grok_api_key not found in .env file.")
     elif not PROMPT:
         print("error: PROMPT not found in .env file.")
+    elif AI_PROVIDER == "openai" and not OPENAI_API_KEY:
+        print("error: OPENAI_API_KEY not set while AI_PROVIDER=openai.")
+    elif AI_PROVIDER == "xai" and not GROK_API_KEY:
+        print("error: GROK_API_KEY not set while AI_PROVIDER=xai.")
     else:
         try:
             client.run(DISCORD_BOT_TOKEN)
