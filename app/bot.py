@@ -287,44 +287,55 @@ async def on_ready():
 @tree.command(name="join", description="Have the bot join your current voice channel (restricted)")
 async def join(interaction: discord.Interaction):
     global voice_client
+    # Defer immediately to avoid Unknown interaction (10062)
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except Exception:
+        pass
+
     if str(interaction.user.id) != VOICE_ALLOWED_USER_ID:
-        await interaction.response.send_message("You are not allowed to use this command.", ephemeral=True)
+        await interaction.followup.send("You are not allowed to use this command.", ephemeral=True)
         return
 
     if not isinstance(interaction.user, discord.Member):
-        await interaction.response.send_message("Cannot resolve your voice state.", ephemeral=True)
+        await interaction.followup.send("Cannot resolve your voice state.", ephemeral=True)
         return
 
     if not interaction.user.voice or not interaction.user.voice.channel:
-        await interaction.response.send_message("You must be connected to a voice channel.", ephemeral=True)
+        await interaction.followup.send("You must be connected to a voice channel.", ephemeral=True)
         return
 
     channel = interaction.user.voice.channel
     try:
         if voice_client and voice_client.is_connected():
             if voice_client.channel.id == channel.id:
-                await interaction.response.send_message(f"Already connected to {channel.name}.", ephemeral=True)
+                await interaction.followup.send(f"Already connected to {channel.name}.", ephemeral=True)
                 return
             await voice_client.move_to(channel)
         else:
             voice_client = await channel.connect()
-        await interaction.response.send_message(f"Joined {channel.name}.", ephemeral=True)
+        await interaction.followup.send(f"Joined {channel.name}.", ephemeral=True)
     except Exception as e:
-        await interaction.response.send_message(f"Failed to join: {e}", ephemeral=True)
+        await interaction.followup.send(f"Failed to join: {e}", ephemeral=True)
 
 
 @tree.command(name="leave", description="Have the bot leave the current voice channel")
 async def leave(interaction: discord.Interaction):
     global voice_client
+    # Defer immediately
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except Exception:
+        pass
     if not voice_client or not voice_client.is_connected():
-        await interaction.response.send_message("I'm not connected to a voice channel.", ephemeral=True)
+        await interaction.followup.send("I'm not connected to a voice channel.", ephemeral=True)
         return
     try:
         await voice_client.disconnect(force=True)
         voice_client = None
-        await interaction.response.send_message("Left the voice channel.", ephemeral=True)
+        await interaction.followup.send("Left the voice channel.", ephemeral=True)
     except Exception as e:
-        await interaction.response.send_message(f"Failed to leave: {e}", ephemeral=True)
+        await interaction.followup.send(f"Failed to leave: {e}", ephemeral=True)
 
 # on message event
 @client.event
