@@ -13,6 +13,9 @@ from typing import AsyncGenerator, Optional, Dict, Tuple
 from discord.ext import voice_recv
 import wave
 import threading
+import base64
+import json as pyjson
+import websockets
 
 try:
     from openai import OpenAI as OpenAIClient
@@ -33,6 +36,11 @@ MODEL = os.getenv("MODEL", "grok-3-mini")
 # OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano")
+VOICE_MODE = os.getenv("VOICE_MODE", "chained").lower()  # chained | realtime
+OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-4o-realtime-preview")
+REALTIME_VOICE = os.getenv("REALTIME_VOICE", "alloy")
+REALTIME_OUTPUT_AUDIO_FORMAT = os.getenv("REALTIME_OUTPUT_AUDIO_FORMAT", "mp3")
+REALTIME_INPUT_AUDIO_FORMAT = os.getenv("REALTIME_INPUT_AUDIO_FORMAT", "pcm16")
 
 # Shared behavior
 PROMPT = os.getenv("PROMPT")
@@ -285,6 +293,68 @@ async def synthesize_and_play(text: str):
             while voice_client.is_playing():
                 await asyncio.sleep(0.25)
 
+async def realtime_generate_audio_from_pcm(pcm: bytes) -> Optional[str]:
+    """Send a single-turn PCM audio buffer to OpenAI Realtime WS, receive audio and return temp file path."""
+    if not OPENAI_API_KEY:
+        return None
+    url = f"wss://api.openai.com/v1/realtime?model={OPENAI_REALTIME_MODEL}"
+    headers = [
+        ("Authorization", f"Bearer {OPENAI_API_KEY}"),
+        ("OpenAI-Beta", "realtime=v1"),
+    ]
+    audio_out: bytearray = bytearray()
+
+    try:
+        async with websockets.connect(url, extra_headers=headers, max_size=None, ping_interval=None) as ws:
+            # Configure session
+            session_update = {
+                "type": "session.update",
+                "session": {
+                    "instructions": PROMPT or "You are a helpful, concise assistant speaking naturally in voice chat.",
+                    "voice": REALTIME_VOICE,
+                    "output_audio_format": {"type": REALTIME_OUTPUT_AUDIO_FORMAT},
+                    "input_audio_format": {"type": REALTIME_INPUT_AUDIO_FORMAT, "sample_rate": 48000, "channels": 2},
+                },
+            }
+            await ws.send(pyjson.dumps(session_update))
+
+            # Append audio chunk
+            await ws.send(pyjson.dumps({
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(pcm).decode("ascii"),
+            }))
+            # Commit and create response
+            await ws.send(pyjson.dumps({"type": "input_audio_buffer.commit"}))
+            await ws.send(pyjson.dumps({"type": "response.create"}))
+
+            # Read events and gather audio deltas
+            final_received = False
+            while True:
+                msg = await ws.recv()
+                try:
+                    event = pyjson.loads(msg)
+                except Exception:
+                    continue
+                ev_type = event.get("type")
+                if ev_type == "response.audio.delta":
+                    delta_b64 = event.get("delta")
+                    if delta_b64:
+                        audio_out.extend(base64.b64decode(delta_b64))
+                elif ev_type in ("response.audio.done", "response.done"):
+                    final_received = True
+                    break
+            # Write to temp file
+            if final_received and audio_out:
+                suffix = ".mp3" if REALTIME_OUTPUT_AUDIO_FORMAT.lower() == "mp3" else ".wav"
+                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                    tmp_path = tmp.name
+                with open(tmp_path, "wb") as f:
+                    f.write(audio_out)
+                return tmp_path
+    except Exception as e:
+        print(f"Realtime WS error: {e}")
+    return None
+
 # on ready event
 @client.event
 async def on_ready():
@@ -345,7 +415,10 @@ class TranscribeSink(voice_recv.AudioSink):
                     self.user_buffers[uid] = bytearray()
 
         for uid, pcm in to_flush.items():
-            await self._transcribe_and_respond(uid, pcm)
+            if VOICE_MODE == "realtime":
+                await self._realtime_voice(uid, pcm)
+            else:
+                await self._transcribe_and_respond(uid, pcm)
 
     async def _transcribe_and_respond(self, uid: int, pcm: bytes):
         global voice_text_channel
@@ -378,6 +451,9 @@ class TranscribeSink(voice_recv.AudioSink):
             history = voice_context_history.setdefault(ch_id, [])
             context = "\n".join(history[-VOICE_CONTEXT_TURNS:]) if history else "voice chat"
 
+            # Debug log: what we heard
+            print(f"[VC STT] {username}: {text}")
+
             # Get AI response (streaming assembled)
             full = ""
             async for chunk in query_ai_api_stream(context, question):
@@ -391,9 +467,32 @@ class TranscribeSink(voice_recv.AudioSink):
 
             # Speak in voice
             try:
+                print(f"[VC TTS] Assistant: {full}")
                 await synthesize_and_play(full)
             except Exception as e:
                 print(f"TTS speak error: {e}")
+
+    async def _realtime_voice(self, uid: int, pcm: bytes):
+        # Realtime direct voice-to-voice using OpenAI Realtime WS
+        # Here we do not transcribe; we send raw PCM and play the returned audio
+        print(f"[VC RT] sending {len(pcm)} bytes to realtime for <@{uid}>")
+        audio_path = await realtime_generate_audio_from_pcm(pcm)
+        if not audio_path:
+            return
+        try:
+            if voice_client and voice_client.is_connected():
+                if voice_client.is_playing():
+                    while voice_client.is_playing():
+                        await asyncio.sleep(0.1)
+                source = discord.FFmpegPCMAudio(audio_path)
+                voice_client.play(source)
+                while voice_client.is_playing():
+                    await asyncio.sleep(0.1)
+        finally:
+            try:
+                os.remove(audio_path)
+            except Exception:
+                pass
         except Exception as e:
             print(f"Voice transcribe/respond error: {e}")
 
