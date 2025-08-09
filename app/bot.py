@@ -251,42 +251,72 @@ except Exception as e:
 
 async def synthesize_and_play(text: str):
     global voice_client
+    print(f"[VC TTS START] Generating TTS for: {text[:100]}...")
+    
     if not VOICE_ENABLED:
+        print("[VC TTS] VOICE_ENABLED=false, skipping")
         return
     if not (voice_client and voice_client.is_connected()):
+        print("[VC TTS] No voice client connected, skipping")
         return
     if not openai_client:
-        print("VOICE_ENABLED but OpenAI client not initialized; skipping TTS")
+        print("[VC TTS] OpenAI client not initialized, skipping")
         return
 
     async with voice_lock:
+        print("[VC TTS] Acquired voice lock, creating temp file")
         # Create temp audio file
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             tmp_path = tmp.name
+        print(f"[VC TTS] Temp file: {tmp_path}")
 
         # Generate TTS via OpenAI (stream to file)
         try:
+            print(f"[VC TTS] Calling OpenAI TTS model={OPENAI_TTS_MODEL} voice={OPENAI_TTS_VOICE}")
             with openai_client.audio.speech.with_streaming_response.create(
                 model=OPENAI_TTS_MODEL,
                 voice=OPENAI_TTS_VOICE,
                 input=text[:4000],  # basic limit for TTS prompt length
             ) as response:
                 response.stream_to_file(tmp_path)
+            print(f"[VC TTS] Audio generated, file size: {os.path.getsize(tmp_path)} bytes")
         except Exception as e:
-            print(f"TTS error: {e}")
+            print(f"[VC TTS ERROR] Failed to generate audio: {e}")
+            try:
+                os.remove(tmp_path)
+            except:
+                pass
             return
 
         # Play in discord via ffmpeg
         if voice_client and voice_client.is_connected():
+            print("[VC TTS] Starting playback in Discord")
             if voice_client.is_playing():
-                # wait for current to finish
+                print("[VC TTS] Waiting for current audio to finish...")
                 while voice_client.is_playing():
                     await asyncio.sleep(0.25)
-            source = discord.FFmpegPCMAudio(tmp_path)
-            voice_client.play(source)
-            while voice_client.is_playing():
-                await asyncio.sleep(0.25)
-        print("[VC TTS] playback finished")
+            
+            try:
+                source = discord.FFmpegPCMAudio(tmp_path)
+                voice_client.play(source)
+                print("[VC TTS] Audio playback started")
+                while voice_client.is_playing():
+                    await asyncio.sleep(0.25)
+                print("[VC TTS] Audio playback finished")
+            except Exception as e:
+                print(f"[VC TTS ERROR] Playback failed: {e}")
+            finally:
+                try:
+                    os.remove(tmp_path)
+                    print("[VC TTS] Temp file cleaned up")
+                except Exception as e:
+                    print(f"[VC TTS] Failed to cleanup temp file: {e}")
+        else:
+            print("[VC TTS] Voice client disconnected during TTS generation")
+            try:
+                os.remove(tmp_path)
+            except:
+                pass
 
 # on ready event
 @client.event
@@ -363,27 +393,46 @@ class TranscribeSink(voice_recv.AudioSink):
             await self._transcribe_and_respond(uid, pcm)
 
     async def _transcribe_and_respond(self, uid: int, pcm: bytes):
+        print(f"[VC STT START] Processing {len(pcm)} bytes for uid={uid}")
+        
         if not openai_client:
+            print("[VC STT ERROR] OpenAI client not initialized")
             return
+            
         try:
+            # Create temp WAV file
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                 tmp_path = tmp.name
+            print(f"[VC STT] Created temp WAV file: {tmp_path}")
+            
             _write_wav(pcm, tmp_path)
+            file_size = os.path.getsize(tmp_path)
+            print(f"[VC STT] WAV file written, size: {file_size} bytes")
+            
+            # Transcribe with OpenAI
             text = None
+            print(f"[VC STT] Calling OpenAI transcription model={OPENAI_STT_MODEL}")
             with open(tmp_path, "rb") as f:
                 stt_resp = openai_client.audio.transcriptions.create(
                     model=OPENAI_STT_MODEL,
                     file=f,
                 )
                 text = getattr(stt_resp, "text", None) or str(stt_resp)
+            
+            # Cleanup temp file
             try:
                 os.remove(tmp_path)
-            except Exception:
-                pass
-            if not text:
+                print("[VC STT] Temp file cleaned up")
+            except Exception as e:
+                print(f"[VC STT] Failed to cleanup temp file: {e}")
+                
+            if not text or not text.strip():
+                print("[VC STT] No text transcribed or empty result")
                 return
+                
             username = f"<@{uid}>"
             question = f"{username}: {text}"
+            
             # Build per-channel voice context separate from text chat
             try:
                 ch_id = int(self.voice_client.channel.id)
@@ -392,32 +441,39 @@ class TranscribeSink(voice_recv.AudioSink):
             history = voice_context_history.setdefault(ch_id, [])
             context = "\n".join(history[-VOICE_CONTEXT_TURNS:]) if history else "voice chat"
 
-            # Debug log: what we heard
-            print(f"[VC STT] {username}: {text}")
+            print(f"[VC STT SUCCESS] {username}: {text}")
+            print(f"[VC LLM START] Generating response with {len(context)} chars context")
 
-            # Get AI response (streaming assembled) [chained mode]
+            # Get AI response (streaming assembled)
             full = ""
+            chunk_count = 0
             async for chunk in query_ai_api_stream(context, question):
                 full += chunk
-                # stream log
-                snip = chunk.replace('\n', ' ')[:120]
-                if snip.strip():
-                    print(f"[VC LLM Δ] {snip}")
+                chunk_count += 1
+                # stream log (less verbose)
+                if chunk_count % 5 == 0:  # every 5th chunk
+                    snip = chunk.replace('\n', ' ')[:80]
+                    if snip.strip():
+                        print(f"[VC LLM Δ{chunk_count}] {snip}")
+                        
             if not full.strip():
                 full = "I'm sorry, I couldn't process that."
+                
+            print(f"[VC LLM SUCCESS] Generated {len(full)} chars in {chunk_count} chunks")
+            
             # Update voice context history
             history.extend([f"User {username}: {text}", f"Assistant: {full}"])
             if len(history) > (VOICE_CONTEXT_TURNS * 2):
                 del history[: len(history) - (VOICE_CONTEXT_TURNS * 2)]
 
             # Speak in voice
-            try:
-                print(f"[VC TTS] Assistant: {full}")
-                await synthesize_and_play(full)
-            except Exception as e:
-                print(f"TTS speak error: {e}")
+            print(f"[VC RESPONSE] Assistant: {full[:200]}{'...' if len(full) > 200 else ''}")
+            await synthesize_and_play(full)
+            
         except Exception as e:
-            print(f"Voice transcribe/respond error: {e}")
+            print(f"[VC ERROR] Voice transcribe/respond failed: {e}")
+            import traceback
+            traceback.print_exc()
 
     # realtime path removed
 
