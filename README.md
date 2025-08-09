@@ -7,7 +7,7 @@ this discord bot replicates the grok mention account on twitter to give AI respo
 - **ai-powered responses**: uses grok api to generate intelligent responses
 - **context-aware**: analyzes message history or replied-to messages for context
 - **live web search**: searches web, news, and x/twitter when "web" is mentioned
-- **image generation**: creates images using grok's image generation model when "image" is mentioned (restricted to authorized users only)
+- **image generation**: creates images using OpenAI GPT Image (`gpt-image-1`) when "image" is mentioned (available to everyone)
 - **configurable**: multiple environment variables for customization
 - **source citations**: optionally shows sources when search is used
 
@@ -43,9 +43,13 @@ this discord bot replicates the grok mention account on twitter to give AI respo
     MAX_SEARCH_RESULTS=5
     SHOW_SOURCES=true
 
-    # Image generation settings (xAI only)
+    # Image generation settings (OpenAI)
     IMAGE_GEN_ENABLED=true
-    ALLOWED_IMAGE_USERS=374703513315442691
+    OPENAI_IMAGE_MODEL=gpt-image-1
+    IMAGE_SIZE=1024x1024
+    IMAGE_QUALITY=high
+    IMAGE_BACKGROUND=auto
+    IMAGE_FORMAT=png
 
     # Voice settings (OpenAI TTS)
     VOICE_ENABLED=true
@@ -135,17 +139,15 @@ when web search is used:
 - source links will be provided (if `SHOW_SOURCES="true"`)
 
 ### image generation usage
-to generate images, include the word "image" in your message (restricted to authorized users only):
+to generate images, include the word "image" in your message (available to all users):
 - `@YourBotName image a cat sitting on a rainbow`
 - `@YourBotName image cyberpunk cityscape at night`
 - `@YourBotName image abstract art with geometric shapes`
 
 when image generation is used:
-- only users listed in `ALLOWED_IMAGE_USERS` can use this feature
-- unauthorized users will receive a "not allowed" message
-- the bot will show both your original prompt and the AI-revised prompt
-- the generated image will be displayed in an embedded format
-- each image costs $0.07 to generate through the xAI API
+- the bot will show your original prompt and may include a revised prompt
+- the generated image is attached directly in the channel
+- powered by OpenAI `gpt-image-1`
 
 ### context behavior
 - **mentioning the bot**: uses the last 10 messages in the channel as context
@@ -159,7 +161,7 @@ you can customize the bot's behavior by modifying the environment variables in y
 - **disable web search**: set `SEARCH_ENABLED="false"`
 - **hide source links**: set `SHOW_SOURCES="false"`
 - **change search limit**: adjust `MAX_SEARCH_RESULTS` (1-20)
-- **switch models**: change `MODEL` to any supported grok model
+- **switch models**: change `MODEL` to any supported grok model (xAI) or `OPENAI_MODEL` for OpenAI text
 - **customize personality**: modify the `PROMPT` variable
 - **disable image generation**: set `IMAGE_GEN_ENABLED="false"`
 - **modify image access**: update `ALLOWED_IMAGE_USERS` with comma-separated user IDs

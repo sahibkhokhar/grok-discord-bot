@@ -39,10 +39,13 @@ SHOW_SOURCES = os.getenv("SHOW_SOURCES", "true").lower() == "true"
 WORD_CHUNK_SIZE = int(os.getenv("WORD_CHUNK_SIZE", "12"))
 EDIT_COOLDOWN_SECONDS = float(os.getenv("EDIT_COOLDOWN_SECONDS", "1.5"))
 
-# Image generation settings (xAI only)
+# Image generation settings (OpenAI preferred)
 IMAGE_GEN_ENABLED = os.getenv("IMAGE_GEN_ENABLED", "true").lower() == "true"
-ALLOWED_IMAGE_USERS = os.getenv("ALLOWED_IMAGE_USERS", "").split(",") if os.getenv("ALLOWED_IMAGE_USERS") else []
-ALLOWED_IMAGE_USERS = [user_id.strip() for user_id in ALLOWED_IMAGE_USERS if user_id.strip()]
+OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+IMAGE_SIZE = os.getenv("IMAGE_SIZE", "1024x1024")
+IMAGE_QUALITY = os.getenv("IMAGE_QUALITY", "high")  # low | medium | high | auto
+IMAGE_BACKGROUND = os.getenv("IMAGE_BACKGROUND", "auto")  # transparent | auto
+IMAGE_FORMAT = os.getenv("IMAGE_FORMAT", "png")  # png | jpeg | webp
 
 # Voice / TTS settings (OpenAI TTS)
 VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
@@ -57,21 +60,35 @@ xai_client = Client(api_key=GROK_API_KEY) if GROK_API_KEY else None
 openai_client = OpenAIClient(api_key=OPENAI_API_KEY) if (OPENAI_API_KEY and OpenAIClient) else None
 
 def is_user_allowed_for_images(user_id: str) -> bool:
-    """Check if user is allowed to use image generation"""
-    return str(user_id) in ALLOWED_IMAGE_USERS
+    """All users are allowed to use image generation now."""
+    return True
 
 def generate_image(prompt: str) -> dict:
-    """Generate an image using xAI's image generation API"""
-    if not xai_client:
-        return {"error": "xAI client not initialized - check your GROK_API_KEY"}
-    
+    """Generate an image using OpenAI's GPT Image API (gpt-image-1)."""
+    if not openai_client:
+        return {"error": "OpenAI client not initialized - check your OPENAI_API_KEY"}
+
     try:
-        response = xai_client.image.sample(
-            model="grok-2-image",
+        result = openai_client.images.generate(
+            model=OPENAI_IMAGE_MODEL,
             prompt=prompt,
-            image_format="url"
+            size=IMAGE_SIZE,
+            quality=IMAGE_QUALITY,
+            background=IMAGE_BACKGROUND,
         )
-        return {"url": response.url, "revised_prompt": response.prompt}
+
+        if not result or not getattr(result, "data", None):
+            return {"error": "No image returned by OpenAI"}
+
+        image_base64 = result.data[0].b64_json
+        file_suffix = ".png" if IMAGE_FORMAT.lower() == "png" else ".jpg" if IMAGE_FORMAT.lower() == "jpeg" else ".webp"
+        with tempfile.NamedTemporaryFile(suffix=file_suffix, delete=False) as tmp:
+            tmp_path = tmp.name
+        import base64
+        with open(tmp_path, "wb") as f:
+            f.write(base64.b64decode(image_base64))
+
+        return {"file_path": tmp_path, "filename": os.path.basename(tmp_path), "revised_prompt": result.data[0].get("revised_prompt") if hasattr(result.data[0], "get") else None}
     except Exception as e:
         return {"error": f"Error generating image: {str(e)}"}
 
@@ -208,6 +225,14 @@ tree = app_commands.CommandTree(client)
 voice_lock = asyncio.Lock()
 voice_client: Optional[discord.VoiceClient] = None
 
+# Ensure opus is loaded for voice
+try:
+    if not discord.opus.is_loaded():
+        discord.opus.load_opus('libopus.so.0')
+        print('Loaded Opus library libopus.so.0')
+except Exception as e:
+    print(f'Warning: could not load Opus library automatically: {e}')
+
 
 async def synthesize_and_play(text: str):
     global voice_client
@@ -323,11 +348,6 @@ async def on_message(message):
 
     # Check if this is an image generation request
     if IMAGE_GEN_ENABLED and "image" in question_text.lower():
-        # Check if user is allowed to use image generation
-        if not is_user_allowed_for_images(str(message.author.id)):
-            await message.reply("❌ You are not allowed to use the image generation feature.")
-            return
-        
         # Extract the image prompt (remove "image" keyword)
         image_prompt = re.sub(r'\bimage\b', '', question_text, flags=re.IGNORECASE).strip()
         
@@ -339,23 +359,36 @@ async def on_message(message):
         
         print(f"Generating image for user {message.author.name} (ID: {message.author.id}) with prompt: {image_prompt}")
         
-        # Generate the image
+        # Generate the image via OpenAI GPT Image
         result = generate_image(image_prompt)
         
         if "error" in result:
             await message.reply(f"❌ Error generating image: {result['error']}")
             return
         
+        file_path = result.get("file_path")
+        filename = result.get("filename", "image.png")
+        revised_prompt = result.get("revised_prompt", "N/A") or "N/A"
+
         # Create an embed for the image
         embed = discord.Embed(
             title="🎨 Generated Image",
-            description=f"**Original prompt:** {image_prompt}\n**Revised prompt:** {result.get('revised_prompt', 'N/A')}",
+            description=f"**Original prompt:** {image_prompt}\n**Revised prompt:** {revised_prompt}",
             color=0x00ff00
         )
-        embed.set_image(url=result['url'])
+        embed.set_image(url=f"attachment://{filename}")
         embed.set_footer(text=f"Requested by {message.author.name}", icon_url=message.author.avatar.url if message.author.avatar else None)
-        
-        await message.reply(embed=embed)
+
+        if file_path and os.path.exists(file_path):
+            try:
+                await message.reply(embed=embed, file=discord.File(file_path, filename=filename))
+            finally:
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+        else:
+            await message.reply("❌ Could not access the generated image file.")
         return
 
     # Add the author's name to the question text
