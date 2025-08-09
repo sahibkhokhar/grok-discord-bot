@@ -5,4 +5,3 @@ xai-sdk
 PyNaCl
 openai
 discord-ext-voice-recv
-websockets
