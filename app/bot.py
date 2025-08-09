@@ -9,7 +9,10 @@ import time
 import tempfile
 from dotenv import load_dotenv
 from xai_sdk import Client
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional, Dict, Tuple
+from discord.ext import voice_recv
+import wave
+import threading
 
 try:
     from openai import OpenAI as OpenAIClient
@@ -52,6 +55,10 @@ VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
 VOICE_ALLOWED_USER_ID = os.getenv("VOICE_ALLOWED_USER_ID", "374703513315442691")
 OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
 OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "alloy")
+
+# Speech-to-text (transcription) via OpenAI - for voice messages/attachments
+STT_ENABLED = os.getenv("STT_ENABLED", "true").lower() == "true"
+OPENAI_STT_MODEL = os.getenv("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
 
 # Initialize xAI client for image generation
 xai_client = Client(api_key=GROK_API_KEY) if GROK_API_KEY else None
@@ -224,6 +231,9 @@ tree = app_commands.CommandTree(client)
 # Voice connection handle
 voice_lock = asyncio.Lock()
 voice_client: Optional[discord.VoiceClient] = None
+voice_sink = None
+voice_flusher_task: Optional[asyncio.Task] = None
+voice_text_channel: Optional[discord.abc.Messageable] = None
 
 # Ensure opus is loaded for voice
 try:
@@ -284,6 +294,124 @@ async def on_ready():
         print(f"Failed to sync commands: {e}")
 
 
+def _write_wav(pcm_bytes: bytes, path: str, sample_rate: int = 48000, channels: int = 2):
+    with wave.open(path, 'wb') as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(2)  # 16-bit
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_bytes)
+
+
+class TranscribeSink(voice_recv.AudioSink):
+    def __init__(self, loop: asyncio.AbstractEventLoop):
+        super().__init__()
+        self.loop = loop
+        self.user_buffers: Dict[int, bytearray] = {}
+        self.user_last_active: Dict[int, float] = {}
+        self.buffer_lock = threading.Lock()
+
+    def wants_opus(self) -> bool:
+        return False
+
+    def write(self, user, data: voice_recv.VoiceData):
+        if data.pcm is None or user is None:
+            return
+        uid = int(user.id)
+        now = time.time()
+        with self.buffer_lock:
+            buf = self.user_buffers.get(uid)
+            if buf is None:
+                buf = bytearray()
+                self.user_buffers[uid] = buf
+            buf.extend(data.pcm)
+            self.user_last_active[uid] = now
+
+    async def flush_inactive(self, inactivity_seconds: float = 1.0, min_ms: int = 700):
+        """Periodically called to flush user buffers to STT when inactive."""
+        now = time.time()
+        to_flush: Dict[int, bytes] = {}
+        with self.buffer_lock:
+            for uid, last in list(self.user_last_active.items()):
+                buf = self.user_buffers.get(uid)
+                if not buf:
+                    continue
+                # Rough ms based on 16-bit stereo 48kHz => 192kB per second
+                ms_len = int(len(buf) / 192_000 * 1000)
+                if (now - last) >= inactivity_seconds and ms_len >= min_ms:
+                    to_flush[uid] = bytes(buf)
+                    self.user_buffers[uid] = bytearray()
+
+        for uid, pcm in to_flush.items():
+            await self._transcribe_and_respond(uid, pcm)
+
+    async def _transcribe_and_respond(self, uid: int, pcm: bytes):
+        global voice_text_channel
+        if not openai_client:
+            return
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_path = tmp.name
+            _write_wav(pcm, tmp_path)
+            text = None
+            with open(tmp_path, "rb") as f:
+                stt_resp = openai_client.audio.transcriptions.create(
+                    model=OPENAI_STT_MODEL,
+                    file=f,
+                )
+                text = getattr(stt_resp, "text", None) or str(stt_resp)
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+            if not text:
+                return
+            username = f"<@{uid}>"
+            question = f"{username} says (voice): {text}"
+            context = "voice chat conversation"
+
+            # Send a small marker in text channel if available
+            if voice_text_channel:
+                try:
+                    await voice_text_channel.send(f"🎙️ {username}: {text}")
+                except Exception:
+                    pass
+
+            # Get AI response (streaming assembled)
+            full = ""
+            async for chunk in query_ai_api_stream(context, question):
+                full += chunk
+            if not full.strip():
+                full = "I'm sorry, I couldn't process that."
+            # Speak in voice and optionally post to text
+            try:
+                await synthesize_and_play(full)
+            except Exception as e:
+                print(f"TTS speak error: {e}")
+            if voice_text_channel:
+                try:
+                    await voice_text_channel.send(full[:2000])
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"Voice transcribe/respond error: {e}")
+
+
+async def _start_voice_listen(vc: discord.VoiceProtocol):
+    global voice_sink, voice_flusher_task
+    loop = asyncio.get_running_loop()
+    voice_sink = TranscribeSink(loop)
+    vc.listen(voice_recv.BasicSink(lambda user, data: voice_sink.write(user, data)))
+
+    async def _flusher():
+        while vc.is_connected():
+            await asyncio.sleep(1.0)
+            try:
+                await voice_sink.flush_inactive()
+            except Exception as e:
+                print(f"Flusher error: {e}")
+    voice_flusher_task = asyncio.create_task(_flusher())
+
+
 @tree.command(name="join", description="Have the bot join your current voice channel (restricted)")
 async def join(interaction: discord.Interaction):
     global voice_client
@@ -313,7 +441,19 @@ async def join(interaction: discord.Interaction):
                 return
             await voice_client.move_to(channel)
         else:
-            voice_client = await channel.connect()
+            # Use voice receive client
+            voice_client = await channel.connect(cls=voice_recv.VoiceRecvClient)
+            # Remember a text channel to post transcriptions
+            try:
+                global voice_text_channel
+                voice_text_channel = interaction.channel
+            except Exception:
+                pass
+            # Start listening for inbound audio
+            try:
+                await _start_voice_listen(voice_client)
+            except Exception as e:
+                print(f"Failed to start voice receive: {e}")
         await interaction.followup.send(f"Joined {channel.name}.", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"Failed to join: {e}", ephemeral=True)
@@ -333,6 +473,13 @@ async def leave(interaction: discord.Interaction):
     try:
         await voice_client.disconnect(force=True)
         voice_client = None
+        try:
+            global voice_flusher_task
+            if voice_flusher_task:
+                voice_flusher_task.cancel()
+                voice_flusher_task = None
+        except Exception:
+            pass
         await interaction.followup.send("Left the voice channel.", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"Failed to leave: {e}", ephemeral=True)
@@ -356,6 +503,48 @@ async def on_message(message):
     if not question_text:
         await message.reply(f"it looks like you mentioned me but didn't ask a question after it!")
         return
+
+    # If there's an audio attachment and STT is enabled, transcribe it and use as the user's question
+    if STT_ENABLED and message.attachments:
+        audio_attachment = None
+        for att in message.attachments:
+            content_type = (att.content_type or "").lower()
+            name_lower = att.filename.lower() if att.filename else ""
+            if (
+                content_type.startswith("audio/")
+                or name_lower.endswith((".ogg", ".oga", ".mp3", ".wav", ".m4a", ".webm"))
+            ):
+                audio_attachment = att
+                break
+
+        if audio_attachment and openai_client:
+            try:
+                await message.channel.typing()
+                # Download audio
+                async with httpx.AsyncClient(timeout=60.0) as dl_client:
+                    audio_bytes = (await dl_client.get(audio_attachment.url)).content
+
+                # Save to temp file and send to OpenAI transcription
+                with tempfile.NamedTemporaryFile(suffix=os.path.splitext(audio_attachment.filename or "audio")[1] or ".ogg", delete=False) as tmp:
+                    tmp_path = tmp.name
+                    tmp.write(audio_bytes)
+
+                with open(tmp_path, "rb") as f:
+                    stt_resp = openai_client.audio.transcriptions.create(
+                        model=OPENAI_STT_MODEL,
+                        file=f,
+                    )
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+                transcribed_text = getattr(stt_resp, "text", None) or str(stt_resp)
+                if transcribed_text:
+                    # Replace user's question with the transcription
+                    question_text = f"{message.author.name} says (voice): {transcribed_text}"
+            except Exception as e:
+                print(f"Transcription error: {e}")
 
     # Check if this is an image generation request
     if IMAGE_GEN_ENABLED and "image" in question_text.lower():

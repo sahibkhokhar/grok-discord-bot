@@ -53,7 +53,7 @@ this discord bot replicates the grok mention account on twitter to give AI respo
 
     # Voice settings (OpenAI TTS)
     VOICE_ENABLED=true
-    VOICE_ALLOWED_USER_ID=374703513315442691
+    VOICE_ALLOWED_USER_ID=
     OPENAI_TTS_MODEL=gpt-4o-mini-tts
     OPENAI_TTS_VOICE=alloy
     ```
