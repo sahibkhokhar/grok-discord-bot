@@ -56,9 +56,12 @@ VOICE_ALLOWED_USER_ID = os.getenv("VOICE_ALLOWED_USER_ID", "374703513315442691")
 OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
 OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "alloy")
 
-# Speech-to-text (transcription) via OpenAI - for voice messages/attachments
+# Speech-to-text (transcription) via OpenAI - for voice messages/attachments and VC
 STT_ENABLED = os.getenv("STT_ENABLED", "true").lower() == "true"
 OPENAI_STT_MODEL = os.getenv("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
+STT_INACTIVITY_SECONDS = float(os.getenv("STT_INACTIVITY_SECONDS", "0.8"))
+STT_MIN_MS = int(os.getenv("STT_MIN_MS", "400"))
+VOICE_CONTEXT_TURNS = int(os.getenv("VOICE_CONTEXT_TURNS", "6"))
 
 # Initialize xAI client for image generation
 xai_client = Client(api_key=GROK_API_KEY) if GROK_API_KEY else None
@@ -233,7 +236,7 @@ voice_lock = asyncio.Lock()
 voice_client: Optional[discord.VoiceClient] = None
 voice_sink = None
 voice_flusher_task: Optional[asyncio.Task] = None
-voice_text_channel: Optional[discord.abc.Messageable] = None
+voice_context_history: Dict[int, list] = {}
 
 # Ensure opus is loaded for voice
 try:
@@ -326,7 +329,7 @@ class TranscribeSink(voice_recv.AudioSink):
             buf.extend(data.pcm)
             self.user_last_active[uid] = now
 
-    async def flush_inactive(self, inactivity_seconds: float = 1.0, min_ms: int = 700):
+    async def flush_inactive(self, inactivity_seconds: float = STT_INACTIVITY_SECONDS, min_ms: int = STT_MIN_MS):
         """Periodically called to flush user buffers to STT when inactive."""
         now = time.time()
         to_flush: Dict[int, bytes] = {}
@@ -366,15 +369,14 @@ class TranscribeSink(voice_recv.AudioSink):
             if not text:
                 return
             username = f"<@{uid}>"
-            question = f"{username} says (voice): {text}"
-            context = "voice chat conversation"
-
-            # Send a small marker in text channel if available
-            if voice_text_channel:
-                try:
-                    await voice_text_channel.send(f"🎙️ {username}: {text}")
-                except Exception:
-                    pass
+            question = f"{username}: {text}"
+            # Build per-channel voice context separate from text chat
+            try:
+                ch_id = int(self.voice_client.channel.id)
+            except Exception:
+                ch_id = 0
+            history = voice_context_history.setdefault(ch_id, [])
+            context = "\n".join(history[-VOICE_CONTEXT_TURNS:]) if history else "voice chat"
 
             # Get AI response (streaming assembled)
             full = ""
@@ -382,16 +384,16 @@ class TranscribeSink(voice_recv.AudioSink):
                 full += chunk
             if not full.strip():
                 full = "I'm sorry, I couldn't process that."
-            # Speak in voice and optionally post to text
+            # Update voice context history
+            history.extend([f"User {username}: {text}", f"Assistant: {full}"])
+            if len(history) > (VOICE_CONTEXT_TURNS * 2):
+                del history[: len(history) - (VOICE_CONTEXT_TURNS * 2)]
+
+            # Speak in voice
             try:
                 await synthesize_and_play(full)
             except Exception as e:
                 print(f"TTS speak error: {e}")
-            if voice_text_channel:
-                try:
-                    await voice_text_channel.send(full[:2000])
-                except Exception:
-                    pass
         except Exception as e:
             print(f"Voice transcribe/respond error: {e}")
 
@@ -400,7 +402,8 @@ async def _start_voice_listen(vc: discord.VoiceProtocol):
     global voice_sink, voice_flusher_task
     loop = asyncio.get_running_loop()
     voice_sink = TranscribeSink(loop)
-    vc.listen(voice_recv.BasicSink(lambda user, data: voice_sink.write(user, data)))
+    # Directly listen with our PCM sink (wants_opus=False)
+    vc.listen(voice_sink)
 
     async def _flusher():
         while vc.is_connected():
@@ -443,12 +446,6 @@ async def join(interaction: discord.Interaction):
         else:
             # Use voice receive client
             voice_client = await channel.connect(cls=voice_recv.VoiceRecvClient)
-            # Remember a text channel to post transcriptions
-            try:
-                global voice_text_channel
-                voice_text_channel = interaction.channel
-            except Exception:
-                pass
             # Start listening for inbound audio
             try:
                 await _start_voice_listen(voice_client)
