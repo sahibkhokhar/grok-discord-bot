@@ -6,7 +6,7 @@ WORKDIR /app
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       ffmpeg libopus0 ca-certificates \
+       ffmpeg libopus0 ca-certificates git build-essential python3-dev libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # copy requirements file
