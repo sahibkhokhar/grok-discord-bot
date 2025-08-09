@@ -63,6 +63,7 @@ VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
 VOICE_ALLOWED_USER_ID = os.getenv("VOICE_ALLOWED_USER_ID", "374703513315442691")
 OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
 OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "alloy")
+SPEAK_TEXT_REPLIES = os.getenv("SPEAK_TEXT_REPLIES", "false").lower() == "true"  # keep VC and chat separate by default
 
 # Speech-to-text (transcription) via OpenAI - for voice messages/attachments and VC
 STT_ENABLED = os.getenv("STT_ENABLED", "true").lower() == "true"
@@ -292,6 +293,7 @@ async def synthesize_and_play(text: str):
             voice_client.play(source)
             while voice_client.is_playing():
                 await asyncio.sleep(0.25)
+        print("[VC TTS] playback finished")
 
 async def realtime_generate_audio_from_pcm(pcm: bytes) -> Optional[str]:
     """Send a single-turn PCM audio buffer to OpenAI Realtime WS, receive audio and return temp file path."""
@@ -421,7 +423,6 @@ class TranscribeSink(voice_recv.AudioSink):
                 await self._transcribe_and_respond(uid, pcm)
 
     async def _transcribe_and_respond(self, uid: int, pcm: bytes):
-        global voice_text_channel
         if not openai_client:
             return
         try:
@@ -454,7 +455,7 @@ class TranscribeSink(voice_recv.AudioSink):
             # Debug log: what we heard
             print(f"[VC STT] {username}: {text}")
 
-            # Get AI response (streaming assembled)
+            # Get AI response (streaming assembled) [chained mode]
             full = ""
             async for chunk in query_ai_api_stream(context, question):
                 full += chunk
@@ -506,12 +507,17 @@ async def _start_voice_listen(vc: discord.VoiceProtocol):
     voice_sink = TranscribeSink(loop)
     # Directly listen with our PCM sink (wants_opus=False)
     vc.listen(voice_sink)
+    print(f"[VC] Listening started with VOICE_MODE={VOICE_MODE}")
 
     async def _flusher():
         while vc.is_connected():
             await asyncio.sleep(1.0)
             try:
                 await voice_sink.flush_inactive()
+                # Debug metric: buffer sizes
+                total_bytes = sum(len(b) for b in getattr(voice_sink, 'user_buffers', {}).values())
+                if total_bytes:
+                    print(f"[VC] buffered bytes={total_bytes}")
             except Exception as e:
                 print(f"Flusher error: {e}")
     voice_flusher_task = asyncio.create_task(_flusher())
@@ -690,7 +696,7 @@ async def on_message(message):
             await message.reply("❌ Could not access the generated image file.")
         return
 
-    # Add the author's name to the question text
+    # Add the author's name to the question text (text-only path; VC is separate)
     question_text = f"{message.author.name} asks: {question_text}"
 
     if message.reference and message.reference.resolved:
@@ -752,11 +758,11 @@ async def on_message(message):
                  final_content = "I am sorry, I encountered an error and could not provide a response."
 
             await sent_message.edit(content=final_content)
-            # Also speak in voice if connected and OpenAI TTS available
-            try:
-                await synthesize_and_play(final_content)
-            except Exception as e:
-                print(f"Voice playback error: {e}")
+            if SPEAK_TEXT_REPLIES:
+                try:
+                    await synthesize_and_play(final_content)
+                except Exception as e:
+                    print(f"Voice playback error: {e}")
 
     except Exception as e:
         print(f"An error occurred during streaming: {e}")
