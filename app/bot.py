@@ -7,6 +7,7 @@ import asyncio
 import json
 import time
 import tempfile
+import logging
 from dotenv import load_dotenv
 from xai_sdk import Client
 from typing import AsyncGenerator, Optional, Dict, Tuple
@@ -292,6 +293,8 @@ async def synthesize_and_play(text: str):
 async def on_ready():
     print(f'we have logged in as {client.user} (id: {client.user.id})')
     print(f"bot is ready and listening for mentions.")
+    # quiet noisy gateway logs from voice-recv extension
+    logging.getLogger("discord.ext.voice_recv.gateway").setLevel(logging.WARNING)
     try:
         await tree.sync()
         print("Slash commands synced.")
@@ -314,6 +317,8 @@ class TranscribeSink(voice_recv.AudioSink):
         self.user_buffers: Dict[int, bytearray] = {}
         self.user_last_active: Dict[int, float] = {}
         self.buffer_lock = threading.Lock()
+        self.user_packet_counts: Dict[int, int] = {}
+        self.user_last_packet_log: Dict[int, float] = {}
 
     def wants_opus(self) -> bool:
         return False
@@ -330,6 +335,13 @@ class TranscribeSink(voice_recv.AudioSink):
                 self.user_buffers[uid] = buf
             buf.extend(data.pcm)
             self.user_last_active[uid] = now
+            # debug: every ~50 packets or 1s, log that we're receiving
+            cnt = self.user_packet_counts.get(uid, 0) + 1
+            self.user_packet_counts[uid] = cnt
+            last_log = self.user_last_packet_log.get(uid, 0.0)
+            if cnt % 50 == 0 or (now - last_log) > 1.0:
+                print(f"[VC RX] uid={uid} packets={cnt} buffer_bytes={len(buf)}")
+                self.user_last_packet_log[uid] = now
 
     async def flush_inactive(self, inactivity_seconds: float = STT_INACTIVITY_SECONDS, min_ms: int = STT_MIN_MS):
         """Periodically called to flush user buffers to STT when inactive."""
@@ -343,6 +355,7 @@ class TranscribeSink(voice_recv.AudioSink):
                 # Rough ms based on 16-bit stereo 48kHz => 192kB per second
                 ms_len = int(len(buf) / 192_000 * 1000)
                 if (now - last) >= inactivity_seconds and ms_len >= min_ms:
+                    print(f"[VC FLUSH] uid={uid} bytes={len(buf)} ms~{ms_len}")
                     to_flush[uid] = bytes(buf)
                     self.user_buffers[uid] = bytearray()
 
@@ -386,6 +399,10 @@ class TranscribeSink(voice_recv.AudioSink):
             full = ""
             async for chunk in query_ai_api_stream(context, question):
                 full += chunk
+                # stream log
+                snip = chunk.replace('\n', ' ')[:120]
+                if snip.strip():
+                    print(f"[VC LLM Δ] {snip}")
             if not full.strip():
                 full = "I'm sorry, I couldn't process that."
             # Update voice context history
@@ -411,7 +428,7 @@ async def _start_voice_listen(vc: discord.VoiceProtocol):
     voice_sink = TranscribeSink(loop)
     # Directly listen with our PCM sink (wants_opus=False)
     vc.listen(voice_sink)
-    print(f"[VC] Listening started with VOICE_MODE={VOICE_MODE}")
+    print("[VC] Listening started (chained STT→LLM→TTS)")
 
     async def _flusher():
         while vc.is_connected():
