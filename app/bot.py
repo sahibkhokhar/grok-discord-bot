@@ -471,6 +471,8 @@ class TranscribeSink(voice_recv.AudioSink):
                 await synthesize_and_play(full)
             except Exception as e:
                 print(f"TTS speak error: {e}")
+        except Exception as e:
+            print(f"Voice transcribe/respond error: {e}")
 
     async def _realtime_voice(self, uid: int, pcm: bytes):
         # Realtime direct voice-to-voice using OpenAI Realtime WS
@@ -480,19 +482,20 @@ class TranscribeSink(voice_recv.AudioSink):
         if not audio_path:
             return
         try:
-            if voice_client and voice_client.is_connected():
-                if voice_client.is_playing():
+            try:
+                if voice_client and voice_client.is_connected():
+                    if voice_client.is_playing():
+                        while voice_client.is_playing():
+                            await asyncio.sleep(0.1)
+                    source = discord.FFmpegPCMAudio(audio_path)
+                    voice_client.play(source)
                     while voice_client.is_playing():
                         await asyncio.sleep(0.1)
-                source = discord.FFmpegPCMAudio(audio_path)
-                voice_client.play(source)
-                while voice_client.is_playing():
-                    await asyncio.sleep(0.1)
-        finally:
-            try:
-                os.remove(audio_path)
-            except Exception:
-                pass
+            finally:
+                try:
+                    os.remove(audio_path)
+                except Exception:
+                    pass
         except Exception as e:
             print(f"Voice transcribe/respond error: {e}")
 
