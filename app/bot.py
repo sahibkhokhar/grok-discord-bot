@@ -57,6 +57,8 @@ VOICE_ALLOWED_USER_ID = os.getenv("VOICE_ALLOWED_USER_ID", "374703513315442691")
 OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
 OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "alloy")
 SPEAK_TEXT_REPLIES = os.getenv("SPEAK_TEXT_REPLIES", "false").lower() == "true"  # keep VC and chat separate by default
+VC_GREETING_JOIN_PROMPT = os.getenv("VC_GREETING_JOIN_PROMPT", "Say a short, friendly hello to {username} who just joined, relevant to them.")
+VC_GREETING_LEAVE_PROMPT = os.getenv("VC_GREETING_LEAVE_PROMPT", "Say a short, friendly goodbye to {username} who just left.")
 
 # Speech-to-text (transcription) via OpenAI - for voice messages/attachments and VC
 STT_ENABLED = os.getenv("STT_ENABLED", "true").lower() == "true"
@@ -297,7 +299,12 @@ async def synthesize_and_play(text: str):
                     await asyncio.sleep(0.25)
             
             try:
-                source = discord.FFmpegPCMAudio(tmp_path)
+                # Some Discord deployments need explicit before_options/options
+                source = discord.FFmpegPCMAudio(
+                    tmp_path,
+                    before_options='-nostdin -hide_banner',
+                    options='-vn'
+                )
                 voice_client.play(source)
                 print("[VC TTS] Audio playback started")
                 while voice_client.is_playing():
@@ -482,8 +489,14 @@ async def _start_voice_listen(vc: discord.VoiceProtocol):
     global voice_sink, voice_flusher_task
     loop = asyncio.get_running_loop()
     voice_sink = TranscribeSink(loop)
-    # Directly listen with our PCM sink (wants_opus=False)
-    vc.listen(voice_sink)
+    try:
+        # Directly listen with our PCM sink (wants_opus=False)
+        vc.listen(voice_sink)
+        # Attach back-reference for context tracking
+        setattr(voice_sink, 'voice_client', vc)
+    except Exception as e:
+        print(f"[VC] Failed to start listening: {e}")
+        return
     print("[VC] Listening started (chained STT→LLM→TTS)")
 
     async def _flusher():
@@ -498,6 +511,42 @@ async def _start_voice_listen(vc: discord.VoiceProtocol):
             except Exception as e:
                 print(f"Flusher error: {e}")
     voice_flusher_task = asyncio.create_task(_flusher())
+
+
+@client.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    # Only react if we're connected and TTS is enabled
+    global voice_client
+    if not VOICE_ENABLED or not openai_client:
+        return
+    # ignore our own state changes and other bots
+    try:
+        if member.bot:
+            return
+        if client.user and member.id == client.user.id:
+            return
+    except Exception:
+        pass
+    if not voice_client or not voice_client.is_connected():
+        return
+    try:
+        current_channel_id = voice_client.channel.id if voice_client and voice_client.channel else None
+    except Exception:
+        current_channel_id = None
+
+    # Join event: user joined the same VC as the bot
+    if after and after.channel and current_channel_id and after.channel.id == current_channel_id and (not before or before.channel != after.channel):
+        username = member.display_name or member.name
+        prompt_text = VC_GREETING_JOIN_PROMPT.format(username=username)
+        await synthesize_and_play(prompt_text)
+        return
+
+    # Leave event: user left the bot's VC
+    if before and before.channel and current_channel_id and before.channel.id == current_channel_id and (not after or after.channel != before.channel):
+        username = member.display_name or member.name
+        prompt_text = VC_GREETING_LEAVE_PROMPT.format(username=username)
+        await synthesize_and_play(prompt_text)
+        return
 
 
 @tree.command(name="join", description="Have the bot join your current voice channel (restricted)")
