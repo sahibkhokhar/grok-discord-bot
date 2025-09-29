@@ -65,6 +65,10 @@ STT_INACTIVITY_SECONDS = float(os.getenv("STT_INACTIVITY_SECONDS", "0.8"))
 STT_MIN_MS = int(os.getenv("STT_MIN_MS", "400"))
 VOICE_CONTEXT_TURNS = int(os.getenv("VOICE_CONTEXT_TURNS", "6"))
 
+# Voice channel join/leave greetings
+VOICE_JOIN_PROMPT = os.getenv("VOICE_JOIN_PROMPT", "Say a brief friendly hello to {username} who just joined the voice channel. Keep it short and welcoming.")
+VOICE_LEAVE_PROMPT = os.getenv("VOICE_LEAVE_PROMPT", "Say a brief friendly goodbye to {username} who just left the voice channel. Keep it short and casual.")
+
 # Initialize xAI client for image generation
 xai_client = Client(api_key=GROK_API_KEY) if GROK_API_KEY else None
 
@@ -341,9 +345,10 @@ def _write_wav(pcm_bytes: bytes, path: str, sample_rate: int = 48000, channels: 
 
 
 class TranscribeSink(voice_recv.AudioSink):
-    def __init__(self, loop: asyncio.AbstractEventLoop):
+    def __init__(self, loop: asyncio.AbstractEventLoop, vc: discord.VoiceProtocol):
         super().__init__()
         self.loop = loop
+        self.voice_client = vc
         self.user_buffers: Dict[int, bytearray] = {}
         self.user_last_active: Dict[int, float] = {}
         self.buffer_lock = threading.Lock()
@@ -481,7 +486,7 @@ class TranscribeSink(voice_recv.AudioSink):
 async def _start_voice_listen(vc: discord.VoiceProtocol):
     global voice_sink, voice_flusher_task
     loop = asyncio.get_running_loop()
-    voice_sink = TranscribeSink(loop)
+    voice_sink = TranscribeSink(loop, vc)
     # Directly listen with our PCM sink (wants_opus=False)
     vc.listen(voice_sink)
     print("[VC] Listening started (chained STT→LLM→TTS)")
@@ -565,6 +570,92 @@ async def leave(interaction: discord.Interaction):
         await interaction.followup.send("Left the voice channel.", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"Failed to leave: {e}", ephemeral=True)
+
+
+@client.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    """Handle user join/leave events in voice channels and greet/farewell them."""
+    global voice_client
+    
+    # Ignore the bot's own state changes
+    if member.bot:
+        return
+    
+    # Check if bot is in a voice channel
+    if not voice_client or not voice_client.is_connected():
+        return
+    
+    bot_channel = voice_client.channel
+    
+    # User joined the bot's voice channel
+    if before.channel != bot_channel and after.channel == bot_channel:
+        print(f"[VC JOIN] {member.name} (ID: {member.id}) joined {bot_channel.name}")
+        await _greet_user(member)
+    
+    # User left the bot's voice channel
+    elif before.channel == bot_channel and after.channel != bot_channel:
+        print(f"[VC LEAVE] {member.name} (ID: {member.id}) left {bot_channel.name}")
+        await _farewell_user(member)
+
+
+async def _greet_user(member: discord.Member):
+    """Generate and speak a personalized greeting for a user who joined the voice channel."""
+    if not VOICE_ENABLED:
+        print(f"[VC GREET] VOICE_ENABLED=false, skipping greeting for {member.name}")
+        return
+    
+    try:
+        # Format the prompt with the username
+        prompt = VOICE_JOIN_PROMPT.format(username=member.name)
+        print(f"[VC GREET] Generating greeting for {member.name}: {prompt}")
+        
+        # Generate AI response
+        greeting = ""
+        async for chunk in query_ai_api_stream("", prompt):
+            greeting += chunk
+        
+        if not greeting.strip():
+            greeting = f"Welcome to the channel, {member.name}!"
+        
+        print(f"[VC GREET] Generated: {greeting[:100]}...")
+        
+        # Speak the greeting
+        await synthesize_and_play(greeting)
+        
+    except Exception as e:
+        print(f"[VC GREET ERROR] Failed to greet {member.name}: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+async def _farewell_user(member: discord.Member):
+    """Generate and speak a personalized farewell for a user who left the voice channel."""
+    if not VOICE_ENABLED:
+        print(f"[VC FAREWELL] VOICE_ENABLED=false, skipping farewell for {member.name}")
+        return
+    
+    try:
+        # Format the prompt with the username
+        prompt = VOICE_LEAVE_PROMPT.format(username=member.name)
+        print(f"[VC FAREWELL] Generating farewell for {member.name}: {prompt}")
+        
+        # Generate AI response
+        farewell = ""
+        async for chunk in query_ai_api_stream("", prompt):
+            farewell += chunk
+        
+        if not farewell.strip():
+            farewell = f"See you later, {member.name}!"
+        
+        print(f"[VC FAREWELL] Generated: {farewell[:100]}...")
+        
+        # Speak the farewell
+        await synthesize_and_play(farewell)
+        
+    except Exception as e:
+        print(f"[VC FAREWELL ERROR] Failed to farewell {member.name}: {e}")
+        import traceback
+        traceback.print_exc()
 
 # on message event
 @client.event
