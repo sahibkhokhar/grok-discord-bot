@@ -8,6 +8,8 @@ this discord bot replicates the grok mention account on twitter to give AI respo
 - **context-aware**: analyzes message history or replied-to messages for context
 - **live web search**: searches web, news, and x/twitter when "web" is mentioned
 - **image generation**: creates images using OpenAI GPT Image (`gpt-image-1`) when "image" is mentioned (available to everyone)
+- **voice chat**: full voice channel support with speech-to-text, AI responses, and text-to-speech
+- **personalized greetings**: bot greets users who join and says goodbye to those who leave voice channels
 - **configurable**: multiple environment variables for customization
 - **source citations**: optionally shows sources when search is used
 
@@ -56,6 +58,10 @@ this discord bot replicates the grok mention account on twitter to give AI respo
     VOICE_ALLOWED_USER_ID=
     OPENAI_TTS_MODEL=gpt-4o-mini-tts
     OPENAI_TTS_VOICE=alloy
+    
+    # Voice channel greetings (customize these prompts!)
+    VOICE_JOIN_PROMPT="Say a brief friendly hello to {username} who just joined the voice channel. Keep it short and welcoming."
+    VOICE_LEAVE_PROMPT="Say a brief friendly goodbye to {username} who just left the voice channel. Keep it short and casual."
     ```
     
     **environment variables explained:**
@@ -75,6 +81,8 @@ this discord bot replicates the grok mention account on twitter to give AI respo
     - `VOICE_ALLOWED_USER_ID`: user ID authorized to run `/join` and `/leave` (others can still speak with the bot once it joins)
     - `OPENAI_TTS_MODEL`: OpenAI TTS model (e.g., `gpt-4o-mini-tts`)
     - `OPENAI_TTS_VOICE`: desired TTS voice name (e.g., `alloy`)
+    - `VOICE_JOIN_PROMPT`: customizable prompt for greeting users who join the voice channel (use `{username}` placeholder)
+    - `VOICE_LEAVE_PROMPT`: customizable prompt for saying goodbye to users who leave the voice channel (use `{username}` placeholder)
 
 3.  **install dependencies (skip if using docker):**
     open your terminal or command prompt in the project directory and install the required python libraries:
@@ -149,10 +157,31 @@ when image generation is used:
 - the generated image is attached directly in the channel
 - powered by OpenAI `gpt-image-1`
 
+### voice channel usage
+to use voice chat features:
+1. join a voice channel in your server
+2. use the `/join` command (requires authorization via `VOICE_ALLOWED_USER_ID`)
+3. the bot will:
+   - greet each user who joins with a personalized AI-generated message
+   - listen to your voice and transcribe it to text
+   - generate AI responses based on what you say
+   - speak responses back in the voice channel using text-to-speech
+   - say goodbye to users who leave the channel
+4. use the `/leave` command to disconnect the bot
+
+**customizing greetings:**
+- edit `VOICE_JOIN_PROMPT` in your `.env` to customize how the bot greets users
+- edit `VOICE_LEAVE_PROMPT` to customize goodbye messages
+- use `{username}` in the prompts to include the user's name
+- examples:
+  - `VOICE_JOIN_PROMPT="Greet {username} in a funny pirate voice"`
+  - `VOICE_LEAVE_PROMPT="Say a dramatic farewell to {username}"`
+
 ### context behavior
 - **mentioning the bot**: uses the last 10 messages in the channel as context
 - **replying to a message**: uses only the replied-to message as context
 - **user identification**: the bot knows who asked the question (includes username in the query)
+- **voice context**: voice conversations maintain separate context from text chat
 
 ## configuration
 
