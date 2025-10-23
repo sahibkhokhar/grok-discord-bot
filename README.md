@@ -10,6 +10,7 @@ this discord bot replicates the grok mention account on twitter to give AI respo
 - **image generation**: creates images using OpenAI GPT Image (`gpt-image-1`) when "image" is mentioned (available to everyone)
 - **configurable**: multiple environment variables for customization
 - **source citations**: optionally shows sources when search is used
+- **auto-simulated user**: periodically reads recent messages and posts as a new participant
 
 ## setup
 
@@ -165,3 +166,23 @@ you can customize the bot's behavior by modifying the environment variables in y
 - **customize personality**: modify the `PROMPT` variable
 - **disable image generation**: set `IMAGE_GEN_ENABLED="false"`
 - **modify image access**: update `ALLOWED_IMAGE_USERS` with comma-separated user IDs
+
+### auto-simulated user posting
+Add a periodic background message that acts like a new user joining the chat. Configure via environment variables:
+
+```env
+# Auto-simulated user
+AUTO_SIM_ENABLED=true                   # enable/disable the feature
+AUTO_SIM_INTERVAL_SECONDS=900           # how often to post (seconds)
+AUTO_SIM_HISTORY_LIMIT=12               # how many recent messages to read as context
+AUTO_SIM_CHANNEL_IDS=123,456,789        # comma/space-separated channel IDs to post into
+AUTO_SIM_USERNAME="New User"           # name to display (when using webhooks)
+AUTO_SIM_AVATAR_URL=                    # optional avatar URL for the simulated user
+AUTO_SIM_USE_WEBHOOK=true               # post via webhook to customize name/avatar
+AUTO_SIM_BEHAVIOR_PROMPT="Continue the conversation as a new participant. Be concise and helpful."
+```
+
+Notes:
+- When `AUTO_SIM_USE_WEBHOOK=true`, the bot will create or reuse a webhook in each target channel so the message appears from `AUTO_SIM_USERNAME` with `AUTO_SIM_AVATAR_URL`.
+- Without webhooks, messages will come from the bot account name/avatar.
+- The simulated message is generated using the same LLM provider/config as normal replies, with the provided recent context.

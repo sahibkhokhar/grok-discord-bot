@@ -10,7 +10,7 @@ import tempfile
 import logging
 from dotenv import load_dotenv
 from xai_sdk import Client
-from typing import AsyncGenerator, Optional, Dict, Tuple
+from typing import AsyncGenerator, Optional, Dict, Tuple, List
 from discord.ext import voice_recv
 import wave
 import threading
@@ -64,6 +64,19 @@ OPENAI_STT_MODEL = os.getenv("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
 STT_INACTIVITY_SECONDS = float(os.getenv("STT_INACTIVITY_SECONDS", "0.8"))
 STT_MIN_MS = int(os.getenv("STT_MIN_MS", "400"))
 VOICE_CONTEXT_TURNS = int(os.getenv("VOICE_CONTEXT_TURNS", "6"))
+
+# Auto-simulated user posting
+AUTO_SIM_ENABLED = os.getenv("AUTO_SIM_ENABLED", "false").lower() == "true"
+AUTO_SIM_INTERVAL_SECONDS = float(os.getenv("AUTO_SIM_INTERVAL_SECONDS", "1800"))  # default 30 minutes
+AUTO_SIM_HISTORY_LIMIT = int(os.getenv("AUTO_SIM_HISTORY_LIMIT", "12"))
+AUTO_SIM_CHANNEL_IDS_RAW = os.getenv("AUTO_SIM_CHANNEL_IDS", "")
+AUTO_SIM_USERNAME = os.getenv("AUTO_SIM_USERNAME", "New User")
+AUTO_SIM_AVATAR_URL = os.getenv("AUTO_SIM_AVATAR_URL", "")
+AUTO_SIM_USE_WEBHOOK = os.getenv("AUTO_SIM_USE_WEBHOOK", "true").lower() == "true"
+AUTO_SIM_BEHAVIOR_PROMPT = os.getenv(
+    "AUTO_SIM_BEHAVIOR_PROMPT",
+    "Continue the conversation as a new participant. Be concise and helpful.",
+)
 
 # Initialize xAI client for image generation
 xai_client = Client(api_key=GROK_API_KEY) if GROK_API_KEY else None
@@ -240,6 +253,151 @@ voice_sink = None
 voice_flusher_task: Optional[asyncio.Task] = None
 voice_context_history: Dict[int, list] = {}
 
+# Auto-sim state
+auto_sim_task: Optional[asyncio.Task] = None
+auto_sim_webhooks: Dict[int, discord.Webhook] = {}
+
+
+def _parse_auto_sim_channel_ids(raw: str) -> List[int]:
+    ids: List[int] = []
+    if not raw:
+        return ids
+    for part in re.split(r"[\s,]+", raw.strip()):
+        if not part:
+            continue
+        try:
+            ids.append(int(part))
+        except ValueError:
+            continue
+    return ids
+
+
+def _start_auto_sim_task():
+    global auto_sim_task
+    if auto_sim_task and not auto_sim_task.done():
+        return
+    auto_sim_task = asyncio.create_task(_auto_sim_loop())
+    print("[AUTO] auto-sim task started")
+
+
+async def _get_or_create_webhook(channel: discord.abc.GuildChannel) -> Optional[discord.Webhook]:
+    if not AUTO_SIM_USE_WEBHOOK:
+        return None
+    try:
+        cached = auto_sim_webhooks.get(int(channel.id))
+        if cached:
+            return cached
+        # Only TextChannel supports webhooks
+        if isinstance(channel, discord.TextChannel):
+            hooks = await channel.webhooks()
+            # Prefer a webhook created by this bot if present; otherwise any reusable one with our name
+            for h in hooks:
+                try:
+                    if (h.user and client.user and h.user.id == client.user.id) or (h.name and "SimUser" in h.name):
+                        auto_sim_webhooks[int(channel.id)] = h
+                        return h
+                except Exception:
+                    continue
+            # Try to create a dedicated webhook
+            wh = await channel.create_webhook(name="SimUser")
+            auto_sim_webhooks[int(channel.id)] = wh
+            return wh
+        return None
+    except Exception as e:
+        print(f"[AUTO] Unable to use webhook for channel {getattr(channel, 'id', '?')}: {e}")
+        return None
+
+
+async def _build_context_from_channel(channel: discord.abc.Messageable, limit: int) -> str:
+    history_lines: List[str] = []
+    try:
+        async for m in channel.history(limit=limit):
+            content = (m.content or "").strip()
+            if not content:
+                continue
+            history_lines.append(f"{m.author.name}: {content}")
+        if history_lines:
+            history_lines.reverse()
+            return "\n".join(history_lines)
+        return "no previous messages found in this channel to use as context."
+    except Exception as e:
+        print(f"[AUTO] Failed to read history in channel {getattr(channel, 'id', '?')}: {e}")
+        return "no previous messages found in this channel to use as context."
+
+
+async def _auto_simulate_in_channel(channel: discord.abc.Messageable):
+    context = await _build_context_from_channel(channel, AUTO_SIM_HISTORY_LIMIT)
+    # Compose instruction for the LLM to act as a new participant
+    question = (
+        f"{AUTO_SIM_USERNAME} joins the conversation and contributes a single natural message. "
+        f"{AUTO_SIM_BEHAVIOR_PROMPT}"
+    )
+
+    full_response = ""
+    current_chunk = ""
+    last_edit_time = 0.0
+
+    # Prepare sending method (webhook if available, else bot)
+    webhook = await _get_or_create_webhook(channel) if AUTO_SIM_USE_WEBHOOK else None
+    sent_message = None
+
+    try:
+        kwargs_common = {"allowed_mentions": discord.AllowedMentions.none()}
+        if webhook:
+            send_kwargs = {"username": AUTO_SIM_USERNAME}
+            if AUTO_SIM_AVATAR_URL:
+                send_kwargs["avatar_url"] = AUTO_SIM_AVATAR_URL
+            # initial message
+            sent_message = await webhook.send(content="🧠 Thinking...", wait=True, **send_kwargs)
+        else:
+            # channel is TextChannel or Thread
+            sent_message = await channel.send("🧠 Thinking...", **kwargs_common)
+
+        # Stream LLM output
+        async for chunk in query_ai_api_stream(context, question):
+            full_response += chunk
+            current_chunk += chunk
+            if len(current_chunk.split()) >= WORD_CHUNK_SIZE and (time.time() - last_edit_time) > EDIT_COOLDOWN_SECONDS:
+                content = (full_response[:1990] + "...") if len(full_response) > 1990 else full_response + "..."
+                await sent_message.edit(content=content)
+                current_chunk = ""
+                last_edit_time = time.time()
+
+        final_content = full_response.strip() or "I'm sorry, I couldn't think of anything to add."
+        if len(final_content) > 2000:
+            final_content = final_content[:2000]
+        await sent_message.edit(content=final_content)
+    except Exception as e:
+        print(f"[AUTO] Streaming failed in channel {getattr(channel, 'id', '?')}: {e}")
+
+
+async def _auto_sim_loop():
+    channel_ids = _parse_auto_sim_channel_ids(AUTO_SIM_CHANNEL_IDS_RAW)
+    if not channel_ids:
+        print("[AUTO] AUTO_SIM_ENABLED is true but no AUTO_SIM_CHANNEL_IDS provided; skipping.")
+        return
+
+    print(f"[AUTO] Will post every {AUTO_SIM_INTERVAL_SECONDS}s in channels: {channel_ids}")
+    while not client.is_closed():
+        cycle_start = time.time()
+        for cid in channel_ids:
+            try:
+                channel = client.get_channel(cid)
+                if channel is None:
+                    try:
+                        channel = await client.fetch_channel(cid)
+                    except Exception:
+                        channel = None
+                if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+                    print(f"[AUTO] Channel {cid} not found or unsupported.")
+                    continue
+                await _auto_simulate_in_channel(channel)
+            except Exception as e:
+                print(f"[AUTO] Error in channel {cid}: {e}")
+        elapsed = time.time() - cycle_start
+        sleep_for = max(1.0, AUTO_SIM_INTERVAL_SECONDS - elapsed)
+        await asyncio.sleep(sleep_for)
+
 # Ensure opus is loaded for voice
 try:
     if not discord.opus.is_loaded():
@@ -330,6 +488,13 @@ async def on_ready():
         print("Slash commands synced.")
     except Exception as e:
         print(f"Failed to sync commands: {e}")
+
+    # Start auto-simulated user task if enabled
+    try:
+        if AUTO_SIM_ENABLED:
+            _start_auto_sim_task()
+    except Exception as e:
+        print(f"Failed to start auto-sim task: {e}")
 
 
 def _write_wav(pcm_bytes: bytes, path: str, sample_rate: int = 48000, channels: int = 2):
