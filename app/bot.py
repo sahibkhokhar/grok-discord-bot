@@ -11,7 +11,7 @@ import logging
 from dotenv import load_dotenv
 from xai_sdk import Client
 from typing import AsyncGenerator, Optional, Dict, Tuple
-from discord.ext import voice_recv
+from discord.ext import voice_recv, tasks
 import wave
 import threading
 
@@ -64,6 +64,12 @@ OPENAI_STT_MODEL = os.getenv("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
 STT_INACTIVITY_SECONDS = float(os.getenv("STT_INACTIVITY_SECONDS", "0.8"))
 STT_MIN_MS = int(os.getenv("STT_MIN_MS", "400"))
 VOICE_CONTEXT_TURNS = int(os.getenv("VOICE_CONTEXT_TURNS", "6"))
+
+# Auto-response settings (simulate new user)
+AUTO_RESPONSE_ENABLED = os.getenv("AUTO_RESPONSE_ENABLED", "false").lower() == "true"
+AUTO_RESPONSE_INTERVAL_SECONDS = int(os.getenv("AUTO_RESPONSE_INTERVAL_SECONDS", "300"))  # default 5 minutes
+AUTO_RESPONSE_MESSAGE_COUNT = int(os.getenv("AUTO_RESPONSE_MESSAGE_COUNT", "10"))  # read last 10 messages
+AUTO_RESPONSE_CHANNEL_IDS = os.getenv("AUTO_RESPONSE_CHANNEL_IDS", "")  # comma-separated channel IDs (empty = all channels)
 
 # Initialize xAI client for image generation
 xai_client = Client(api_key=GROK_API_KEY) if GROK_API_KEY else None
@@ -318,6 +324,82 @@ async def synthesize_and_play(text: str):
             except:
                 pass
 
+# Background task for auto-response feature
+@tasks.loop(seconds=AUTO_RESPONSE_INTERVAL_SECONDS if AUTO_RESPONSE_ENABLED else 3600)
+async def auto_respond_task():
+    """Periodically reads past messages and responds as a new user joining the conversation."""
+    if not AUTO_RESPONSE_ENABLED:
+        return
+    
+    try:
+        # Parse channel IDs if specified
+        target_channel_ids = []
+        if AUTO_RESPONSE_CHANNEL_IDS:
+            target_channel_ids = [int(cid.strip()) for cid in AUTO_RESPONSE_CHANNEL_IDS.split(",") if cid.strip()]
+        
+        # Iterate through all text channels the bot has access to
+        for guild in client.guilds:
+            for channel in guild.text_channels:
+                # Skip if we have specific channels configured and this isn't one of them
+                if target_channel_ids and channel.id not in target_channel_ids:
+                    continue
+                
+                # Check if bot has permission to read and send messages
+                if not channel.permissions_for(guild.me).read_messages or not channel.permissions_for(guild.me).send_messages:
+                    continue
+                
+                try:
+                    # Fetch recent messages
+                    messages = []
+                    async for msg in channel.history(limit=AUTO_RESPONSE_MESSAGE_COUNT):
+                        # Skip bot's own messages
+                        if msg.author == client.user:
+                            continue
+                        messages.append(f"{msg.author.name}: {msg.content}")
+                    
+                    # If no messages found, skip this channel
+                    if not messages:
+                        continue
+                    
+                    # Reverse to get chronological order
+                    messages.reverse()
+                    context = "\n".join(messages)
+                    
+                    # Create a prompt as if the bot is a new user observing the conversation
+                    question = "You are a new person who just joined this chat and read the recent conversation. Respond naturally as if you're contributing to the discussion. Don't introduce yourself, just jump in with a relevant comment, question, or observation about what was discussed. Keep it casual and conversational."
+                    
+                    print(f"[AUTO-RESPONSE] Generating response for channel: {channel.name} (guild: {guild.name})")
+                    
+                    # Generate response
+                    full_response = ""
+                    async for chunk in query_ai_api_stream(context, question):
+                        full_response += chunk
+                    
+                    # If response is empty, skip
+                    if not full_response.strip():
+                        continue
+                    
+                    # Limit response length
+                    if len(full_response) > 2000:
+                        full_response = full_response[:2000]
+                    
+                    # Send the response
+                    await channel.send(full_response)
+                    print(f"[AUTO-RESPONSE] Sent response to {channel.name}: {full_response[:100]}...")
+                    
+                except discord.Forbidden:
+                    print(f"[AUTO-RESPONSE] No permission to access channel: {channel.name}")
+                except Exception as e:
+                    print(f"[AUTO-RESPONSE] Error processing channel {channel.name}: {e}")
+                    
+    except Exception as e:
+        print(f"[AUTO-RESPONSE] Error in auto_respond_task: {e}")
+
+@auto_respond_task.before_loop
+async def before_auto_respond():
+    """Wait until the bot is ready before starting the auto-response task."""
+    await client.wait_until_ready()
+
 # on ready event
 @client.event
 async def on_ready():
@@ -330,6 +412,15 @@ async def on_ready():
         print("Slash commands synced.")
     except Exception as e:
         print(f"Failed to sync commands: {e}")
+    
+    # Start auto-response task if enabled
+    if AUTO_RESPONSE_ENABLED:
+        auto_respond_task.start()
+        print(f"[AUTO-RESPONSE] Task started - will run every {AUTO_RESPONSE_INTERVAL_SECONDS} seconds")
+        if AUTO_RESPONSE_CHANNEL_IDS:
+            print(f"[AUTO-RESPONSE] Target channels: {AUTO_RESPONSE_CHANNEL_IDS}")
+        else:
+            print("[AUTO-RESPONSE] Will respond in all accessible channels")
 
 
 def _write_wav(pcm_bytes: bytes, path: str, sample_rate: int = 48000, channels: int = 2):

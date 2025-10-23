@@ -8,6 +8,7 @@ this discord bot replicates the grok mention account on twitter to give AI respo
 - **context-aware**: analyzes message history or replied-to messages for context
 - **live web search**: searches web, news, and x/twitter when "web" is mentioned
 - **image generation**: creates images using OpenAI GPT Image (`gpt-image-1`) when "image" is mentioned (available to everyone)
+- **auto-response mode**: periodically reads past messages and responds as a new user joining the conversation
 - **configurable**: multiple environment variables for customization
 - **source citations**: optionally shows sources when search is used
 
@@ -56,6 +57,12 @@ this discord bot replicates the grok mention account on twitter to give AI respo
     VOICE_ALLOWED_USER_ID=
     OPENAI_TTS_MODEL=gpt-4o-mini-tts
     OPENAI_TTS_VOICE=alloy
+
+    # Auto-response settings (simulate new user)
+    AUTO_RESPONSE_ENABLED=false
+    AUTO_RESPONSE_INTERVAL_SECONDS=300
+    AUTO_RESPONSE_MESSAGE_COUNT=10
+    AUTO_RESPONSE_CHANNEL_IDS=
     ```
     
     **environment variables explained:**
@@ -75,6 +82,10 @@ this discord bot replicates the grok mention account on twitter to give AI respo
     - `VOICE_ALLOWED_USER_ID`: user ID authorized to run `/join` and `/leave` (others can still speak with the bot once it joins)
     - `OPENAI_TTS_MODEL`: OpenAI TTS model (e.g., `gpt-4o-mini-tts`)
     - `OPENAI_TTS_VOICE`: desired TTS voice name (e.g., `alloy`)
+    - `AUTO_RESPONSE_ENABLED`: enable/disable automatic periodic responses (`true`/`false`)
+    - `AUTO_RESPONSE_INTERVAL_SECONDS`: how often (in seconds) the bot should auto-respond (default: 300 = 5 minutes)
+    - `AUTO_RESPONSE_MESSAGE_COUNT`: number of recent messages to read before generating response (default: 10)
+    - `AUTO_RESPONSE_CHANNEL_IDS`: comma-separated list of channel IDs to auto-respond in (empty = all channels)
 
 3.  **install dependencies (skip if using docker):**
     open your terminal or command prompt in the project directory and install the required python libraries:
@@ -148,6 +159,26 @@ when image generation is used:
 - the bot will show your original prompt and may include a revised prompt
 - the generated image is attached directly in the channel
 - powered by OpenAI `gpt-image-1`
+
+### auto-response usage (simulate new user)
+the bot can periodically read recent messages and respond as if it's a new user joining the conversation:
+
+to enable this feature, set the following in your `.env` file:
+```env
+AUTO_RESPONSE_ENABLED=true
+AUTO_RESPONSE_INTERVAL_SECONDS=300  # respond every 5 minutes
+AUTO_RESPONSE_MESSAGE_COUNT=10      # read last 10 messages
+AUTO_RESPONSE_CHANNEL_IDS=          # empty = all channels, or specify channel IDs like: 123456789,987654321
+```
+
+when enabled:
+- the bot will automatically read the last X messages in configured channels
+- it will generate a natural response as if it's a new person joining the conversation
+- responses are sent without requiring a mention
+- the bot won't respond to its own messages
+- you can limit it to specific channels by providing channel IDs
+
+**note**: use this feature responsibly! frequent auto-responses may be disruptive in active channels.
 
 ### context behavior
 - **mentioning the bot**: uses the last 10 messages in the channel as context
