@@ -239,6 +239,22 @@ async def on_ready():
     print(f"AI_PROVIDER={AI_PROVIDER}, IMAGE_GEN={IMAGE_GEN_ENABLED}")
     if BLOCKED_USER_IDS:
         print(f"Blocked users: {len(BLOCKED_USER_IDS)} user(s)")
+    
+    # Print all guilds the bot is in
+    print(f"\n{'='*60}")
+    print(f"CONNECTED TO {len(client.guilds)} SERVER(S):")
+    print(f"{'='*60}")
+    for guild in client.guilds:
+        owner_info = f"{guild.owner.name} (ID: {guild.owner_id})" if guild.owner else f"ID: {guild.owner_id}"
+        print(f"\n📍 Server: {guild.name}")
+        print(f"   ID: {guild.id}")
+        print(f"   Owner: {owner_info}")
+        print(f"   Members: {guild.member_count}")
+        print(f"   Created: {guild.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        if guild.me and guild.me.joined_at:
+            print(f"   Bot joined: {guild.me.joined_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"\n{'='*60}\n")
+    
     try:
         await tree.sync()
         print("Slash commands synced.")
