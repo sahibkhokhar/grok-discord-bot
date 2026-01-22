@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import sys
 import tempfile
@@ -88,6 +89,24 @@ MESSAGE_HISTORY_LIMIT = max(1, env_int("MESSAGE_HISTORY_LIMIT", 30))
 DISCORD_MESSAGE_LIMIT: Final[int] = 2000
 DISCORD_MESSAGE_EDIT_LIMIT: Final[int] = 1990
 
+# Random chat behavior
+RANDOM_CHAT_ENABLED = env_bool("RANDOM_CHAT_ENABLED", False)
+RANDOM_CHAT_INTERVAL_MINUTES = max(1, env_int("RANDOM_CHAT_INTERVAL_MINUTES", 30))
+RANDOM_CHAT_CHANCE = env_float("RANDOM_CHAT_CHANCE", 0.25)
+RANDOM_CHAT_RECENT_SECONDS = max(30, env_int("RANDOM_CHAT_RECENT_SECONDS", 300))
+RANDOM_CHAT_CHANNEL_IDS_RAW = os.getenv("RANDOM_CHAT_CHANNEL_IDS", "")
+RANDOM_CHAT_CHANNEL_IDS = []
+if RANDOM_CHAT_CHANNEL_IDS_RAW.strip():
+    for raw_id in RANDOM_CHAT_CHANNEL_IDS_RAW.split(","):
+        try:
+            channel_id = int(raw_id.strip())
+            RANDOM_CHAT_CHANNEL_IDS.append(channel_id)
+        except ValueError:
+            logger.warning("Invalid channel id in RANDOM_CHAT_CHANNEL_IDS: %s", raw_id)
+
+if RANDOM_CHAT_CHANCE > 1:
+    RANDOM_CHAT_CHANCE = min(1.0, RANDOM_CHAT_CHANCE / 100.0)
+
 # Blocked users (comma-separated user IDs)
 BLOCKED_USER_IDS = set()
 blocked_users_str = os.getenv("BLOCKED_USER_IDS", "")
@@ -114,6 +133,16 @@ def build_system_prompt() -> str:
         f"{base_prompt}\n\n"
         "You are in a Discord conversation. Respond naturally and directly to the user's question. "
         "Do not repeat the message format or echo usernames in your response."
+    )
+
+
+def build_random_chat_prompt() -> str:
+    return (
+        "You are a normal participant in a Discord chat. "
+        "Write a single, natural message that blends in with the recent conversation. "
+        "Match the tone, slang, and style of the participants. "
+        "Do not mention being an AI, bot, or assistant. "
+        "Do not explain yourself. Keep it short and conversational."
     )
 
 def generate_image(prompt: str) -> dict:
@@ -154,7 +183,11 @@ def generate_image(prompt: str) -> dict:
         return {"error": f"Error generating image: {e}"}
 
 # --- AI Querying ---
-async def query_xai_api_stream(context_messages: str, question: str) -> AsyncGenerator[str, None]:
+async def query_xai_api_stream(
+    context_messages: str,
+    question: str,
+    system_prompt: str | None = None,
+) -> AsyncGenerator[str, None]:
     """
     Asynchronously queries the Grok API with streaming enabled and yields content chunks.
     """
@@ -172,7 +205,7 @@ async def query_xai_api_stream(context_messages: str, question: str) -> AsyncGen
     messages = [
         {
             "role": "system",
-            "content": build_system_prompt(),
+            "content": system_prompt or build_system_prompt(),
         },
         {
             "role": "user",
@@ -224,7 +257,11 @@ async def query_xai_api_stream(context_messages: str, question: str) -> AsyncGen
         yield f"error communicating with grok api: {e}"
 
 
-async def query_openai_api_stream(context_messages: str, question: str) -> AsyncGenerator[str, None]:
+async def query_openai_api_stream(
+    context_messages: str,
+    question: str,
+    system_prompt: str | None = None,
+) -> AsyncGenerator[str, None]:
     """Asynchronously queries OpenAI Responses API with optional streaming."""
     if not openai_client:
         yield "error: openai client not initialized - check your OPENAI_API_KEY"
@@ -243,7 +280,7 @@ async def query_openai_api_stream(context_messages: str, question: str) -> Async
         stream = openai_client.responses.create(
             model=OPENAI_MODEL,
             input=user_input,
-            instructions=build_system_prompt(),
+            instructions=system_prompt or build_system_prompt(),
             stream=True,
         )
         for event in stream:  # note: OpenAI SDK yields events synchronously
@@ -262,15 +299,26 @@ async def query_openai_api_stream(context_messages: str, question: str) -> Async
         yield f"error communicating with openai api: {e}"
 
 
-async def query_ai_api_stream(context_messages: str, question: str) -> AsyncGenerator[str, None]:
+async def query_ai_api_stream(
+    context_messages: str,
+    question: str,
+    system_prompt: str | None = None,
+) -> AsyncGenerator[str, None]:
     """Dispatch to the configured provider."""
     provider = AI_PROVIDER
     if provider == "openai":
-        async for chunk in query_openai_api_stream(context_messages, question):
+        async for chunk in query_openai_api_stream(context_messages, question, system_prompt):
             yield chunk
     else:
-        async for chunk in query_xai_api_stream(context_messages, question):
+        async for chunk in query_xai_api_stream(context_messages, question, system_prompt):
             yield chunk
+
+
+async def generate_ai_response(context_messages: str, prompt: str, system_prompt: str | None = None) -> str:
+    full_response = ""
+    async for chunk in query_ai_api_stream(context_messages, prompt, system_prompt):
+        full_response += chunk
+    return full_response.strip()
 
 # setup the discord client
 intents = discord.Intents.default()
@@ -280,6 +328,7 @@ intents.guilds = True
 
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
+random_chat_task: asyncio.Task | None = None
 
 # on ready event
 @client.event
@@ -310,6 +359,11 @@ async def on_ready():
         logger.info("Slash commands synced.")
     except Exception as e:
         logger.exception("Failed to sync commands")
+
+    global random_chat_task
+    if random_chat_task is None:
+        random_chat_task = asyncio.create_task(random_chat_loop())
+        logger.info("Random chat loop started.")
 
 # on message event
 @client.event
@@ -455,6 +509,69 @@ async def on_message(message):
         logger.exception("An error occurred during streaming")
         if sent_message:
             await sent_message.edit(content="An error occurred while generating the response.")
+
+
+async def random_chat_loop() -> None:
+    await client.wait_until_ready()
+    if not RANDOM_CHAT_ENABLED:
+        logger.info("Random chat disabled.")
+        return
+    if not RANDOM_CHAT_CHANNEL_IDS:
+        logger.warning("Random chat enabled but no channel IDs configured.")
+        return
+
+    interval_seconds = RANDOM_CHAT_INTERVAL_MINUTES * 60
+    while not client.is_closed():
+        await asyncio.sleep(interval_seconds)
+
+        if random.random() > RANDOM_CHAT_CHANCE:
+            continue
+
+        now = discord.utils.utcnow()
+        for channel_id in RANDOM_CHAT_CHANNEL_IDS:
+            channel = client.get_channel(channel_id)
+            if channel is None:
+                try:
+                    channel = await client.fetch_channel(channel_id)
+                except Exception:
+                    logger.warning("Failed to fetch channel %s", channel_id)
+                    continue
+
+            if not isinstance(channel, discord.TextChannel):
+                continue
+
+            history_messages = []
+            newest_message = None
+            async for historic_msg in channel.history(limit=MESSAGE_HISTORY_LIMIT):
+                if newest_message is None:
+                    newest_message = historic_msg
+                history_messages.append(f"{historic_msg.author.name}: {historic_msg.content}")
+
+            if not newest_message or newest_message.author == client.user:
+                continue
+
+            recency_seconds = (now - newest_message.created_at).total_seconds()
+            if recency_seconds > RANDOM_CHAT_RECENT_SECONDS:
+                continue
+
+            history_messages.reverse()
+            context_for_ai = "\n".join(history_messages) if history_messages else "[No recent context]"
+            prompt = (
+                "Based on the recent messages, write one short message that fits the conversation. "
+                "Do not address anyone by name unless others did. Keep it under 200 characters."
+            )
+
+            try:
+                response = await generate_ai_response(
+                    context_for_ai,
+                    prompt,
+                    system_prompt=build_random_chat_prompt(),
+                )
+                if response:
+                    await channel.send(response[:DISCORD_MESSAGE_LIMIT])
+                    logger.info("Random chat message sent to channel %s", channel.id)
+            except Exception:
+                logger.exception("Failed to send random chat message")
 
 # main
 if __name__ == "__main__":
