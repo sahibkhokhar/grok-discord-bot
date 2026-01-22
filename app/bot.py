@@ -106,6 +106,7 @@ if RANDOM_CHAT_CHANNEL_IDS_RAW.strip():
 
 if RANDOM_CHAT_CHANCE > 1:
     RANDOM_CHAT_CHANCE = min(1.0, RANDOM_CHAT_CHANCE / 100.0)
+RANDOM_CHAT_CHANCE = max(0.0, min(1.0, RANDOM_CHAT_CHANCE))
 
 # Blocked users (comma-separated user IDs)
 BLOCKED_USER_IDS = set()
@@ -114,7 +115,7 @@ if blocked_users_str.strip():
     try:
         BLOCKED_USER_IDS = set(int(uid.strip()) for uid in blocked_users_str.split(",") if uid.strip())
     except ValueError:
-        print("Warning: Invalid user IDs in BLOCKED_USER_IDS, ignoring.")
+        logger.warning("Invalid user IDs in BLOCKED_USER_IDS, ignoring.")
 
 # Image generation settings (OpenAI preferred)
 IMAGE_GEN_ENABLED = env_bool("IMAGE_GEN_ENABLED", True)
@@ -487,7 +488,7 @@ async def on_message(message):
             if len(current_chunk.split()) >= WORD_CHUNK_SIZE and (time.monotonic() - last_edit_time) > EDIT_COOLDOWN_SECONDS:
                 if len(full_response) > DISCORD_MESSAGE_EDIT_LIMIT:  # Leave some buffer
                     await sent_message.edit(content=full_response[:DISCORD_MESSAGE_EDIT_LIMIT] + "...")
-                     break # Stop streaming if message is too long
+                    break  # Stop streaming if message is too long
                 
                 await sent_message.edit(content=full_response + "...")
                 current_chunk = ""
@@ -568,6 +569,10 @@ async def random_chat_loop() -> None:
                     system_prompt=build_random_chat_prompt(),
                 )
                 if response:
+                    lower_response = response.strip().lower()
+                    if lower_response.startswith("error:"):
+                        logger.warning("Skipping random chat due to provider error: %s", response)
+                        continue
                     await channel.send(response[:DISCORD_MESSAGE_LIMIT])
                     logger.info("Random chat message sent to channel %s", channel.id)
             except Exception:
