@@ -55,6 +55,14 @@ this discord bot gives AI responses to messages in discord servers. it includes 
     IMAGE_QUALITY=high
     IMAGE_BACKGROUND=auto
     IMAGE_FORMAT=png
+    
+    # Random chat (optional)
+    RANDOM_CHAT_ENABLED=false
+    RANDOM_CHAT_INTERVAL_MIN_MINUTES=20
+    RANDOM_CHAT_INTERVAL_MAX_MINUTES=40
+    RANDOM_CHAT_CHANCE=0.25
+    RANDOM_CHAT_RECENT_SECONDS=300
+    RANDOM_CHAT_CHANNEL_IDS=
     ```
     
     **environment variables explained:**
@@ -76,6 +84,12 @@ this discord bot gives AI responses to messages in discord servers. it includes 
     - `IMAGE_QUALITY`: image quality (`low`, `medium`, `high`, `auto`)
     - `IMAGE_BACKGROUND`: background type (`transparent`, `auto`)
     - `IMAGE_FORMAT`: output format (`png`, `jpeg`, `webp`)
+    - `RANDOM_CHAT_ENABLED`: enable/disable random chat feature (`true`/`false`, default: `false`)
+    - `RANDOM_CHAT_INTERVAL_MIN_MINUTES`: minimum minutes between random chat checks (default: 20)
+    - `RANDOM_CHAT_INTERVAL_MAX_MINUTES`: maximum minutes between random chat checks (default: 40)
+    - `RANDOM_CHAT_CHANCE`: probability of sending a message when conditions are met (0.0-1.0, default: 0.25)
+    - `RANDOM_CHAT_RECENT_SECONDS`: only chat if there's been activity in the last N seconds (default: 300)
+    - `RANDOM_CHAT_CHANNEL_IDS`: comma-separated list of channel IDs where random chat is allowed
 
 3.  **install dependencies (skip if using docker):**
     ```bash

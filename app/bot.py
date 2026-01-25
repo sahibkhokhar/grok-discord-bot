@@ -91,7 +91,16 @@ DISCORD_MESSAGE_EDIT_LIMIT: Final[int] = 1990
 
 # Random chat behavior
 RANDOM_CHAT_ENABLED = env_bool("RANDOM_CHAT_ENABLED", False)
-RANDOM_CHAT_INTERVAL_MINUTES = max(1, env_int("RANDOM_CHAT_INTERVAL_MINUTES", 30))
+RANDOM_CHAT_INTERVAL_MIN_MINUTES = max(1, env_int("RANDOM_CHAT_INTERVAL_MIN_MINUTES", 20))
+RANDOM_CHAT_INTERVAL_MAX_MINUTES = max(1, env_int("RANDOM_CHAT_INTERVAL_MAX_MINUTES", 40))
+# Ensure min is not greater than max
+if RANDOM_CHAT_INTERVAL_MIN_MINUTES > RANDOM_CHAT_INTERVAL_MAX_MINUTES:
+    logger.warning(
+        "RANDOM_CHAT_INTERVAL_MIN_MINUTES (%s) > RANDOM_CHAT_INTERVAL_MAX_MINUTES (%s), swapping values",
+        RANDOM_CHAT_INTERVAL_MIN_MINUTES,
+        RANDOM_CHAT_INTERVAL_MAX_MINUTES
+    )
+    RANDOM_CHAT_INTERVAL_MIN_MINUTES, RANDOM_CHAT_INTERVAL_MAX_MINUTES = RANDOM_CHAT_INTERVAL_MAX_MINUTES, RANDOM_CHAT_INTERVAL_MIN_MINUTES
 RANDOM_CHAT_CHANCE = env_float("RANDOM_CHAT_CHANCE", 0.25)
 RANDOM_CHAT_RECENT_SECONDS = max(30, env_int("RANDOM_CHAT_RECENT_SECONDS", 300))
 RANDOM_CHAT_CHANNEL_IDS_RAW = os.getenv("RANDOM_CHAT_CHANNEL_IDS", "")
@@ -521,8 +530,11 @@ async def random_chat_loop() -> None:
         logger.warning("Random chat enabled but no channel IDs configured.")
         return
 
-    interval_seconds = RANDOM_CHAT_INTERVAL_MINUTES * 60
     while not client.is_closed():
+        # Calculate a random interval between min and max for each iteration
+        interval_minutes = random.randint(RANDOM_CHAT_INTERVAL_MIN_MINUTES, RANDOM_CHAT_INTERVAL_MAX_MINUTES)
+        interval_seconds = interval_minutes * 60
+        logger.info("Next random chat check in %s minutes", interval_minutes)
         await asyncio.sleep(interval_seconds)
 
         if random.random() > RANDOM_CHAT_CHANCE:
