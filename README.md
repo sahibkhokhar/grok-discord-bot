@@ -162,7 +162,7 @@ when image generation is used:
 
 ### context behavior
 - **mentioning the bot**: uses recent message history in the channel as context (configurable via `MESSAGE_HISTORY_LIMIT`, default: 30 messages)
-- **replying to a message**: uses only the replied-to message as context
+- **replying to a message**: uses messages before the replied-to message (primary context), the replied-to message itself, and messages after it (secondary, lower priority)
 - **user identification**: the bot knows who asked the question (includes username in the query)
 
 ## configuration
