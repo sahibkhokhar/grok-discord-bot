@@ -8,6 +8,7 @@ this discord bot gives AI responses to messages in discord servers. it includes 
 - **context-aware**: analyzes message history or replied-to messages for context
 - **live web search**: searches web, news, and x/twitter when "web" is mentioned (xAI only)
 - **image generation**: creates images using OpenAI GPT Image (`gpt-image-1`) when "image" is mentioned (available to everyone)
+- **local tools**: time/date, dice rolls, safe calculator, text transforms (reverse, ROT13, etc.), and optional **Pocket TTS** voice replies (CPU, local only; [kyutai-labs/pocket-tts](https://github.com/kyutai-labs/pocket-tts))
 - **provider switching**: easily switch between xAI (Grok) and OpenAI (ChatGPT)
 - **configurable**: multiple environment variables for customization
 
@@ -84,6 +85,8 @@ this discord bot gives AI responses to messages in discord servers. it includes 
     - `IMAGE_QUALITY`: image quality (`low`, `medium`, `high`, `auto`)
     - `IMAGE_BACKGROUND`: background type (`transparent`, `auto`)
     - `IMAGE_FORMAT`: output format (`png`, `jpeg`, `webp`)
+    - `LOCAL_TOOLS_ENABLED`: enable local tools—time, dice, calculator, text, TTS (`true`/`false`, default: `true`)
+    - `TTS_ENABLED`: enable Pocket TTS voice replies (`true`/`false`, default: `true`). Disable to skip loading the TTS model (smaller memory).
     - `RANDOM_CHAT_ENABLED`: enable/disable random chat feature (`true`/`false`, default: `false`)
     - `RANDOM_CHAT_INTERVAL_MIN_MINUTES`: minimum minutes between random chat checks (default: 20)
     - `RANDOM_CHAT_INTERVAL_MAX_MINUTES`: maximum minutes between random chat checks (default: 40)
@@ -159,6 +162,17 @@ when image generation is used:
 - the bot will show your original prompt and may include a revised prompt
 - the generated image is attached directly in the channel
 - powered by OpenAI `gpt-image-1`
+
+### local tools (optional)
+when `LOCAL_TOOLS_ENABLED=true`, the bot can use local-only tools based on what you ask. the model decides when to use them and inserts tags; the bot runs the tools and replaces them with results.
+
+- **time/date**: e.g. "what time is it?", "what day is it?", "how many days until new year?"
+- **dice**: e.g. "roll 2d6", "roll a d20"
+- **calculator**: e.g. "what's 15% of 80?", "sqrt(144)"
+- **text**: e.g. "reverse hello", "rot13 for fun"
+- **voice (TTS)**: ask the bot to "say" or "speak" something; it will reply with text and attach an audio file (Pocket TTS, English, CPU). set `TTS_ENABLED=false` to disable or to reduce Docker image load.
+
+audio files are generated on the server, attached to the message, then deleted; they are not stored.
 
 ### context behavior
 - **mentioning the bot**: uses recent message history in the channel as context (configurable via `MESSAGE_HISTORY_LIMIT`, default: 30 messages)

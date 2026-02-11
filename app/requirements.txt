@@ -3,3 +3,6 @@ python-dotenv
 httpx
 xai-sdk
 openai
+simpleeval
+scipy
+pocket-tts

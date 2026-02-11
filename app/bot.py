@@ -14,6 +14,8 @@ import httpx
 from discord import app_commands
 from dotenv import load_dotenv
 
+from local_tools import process_tool_tags
+
 try:
     from openai import OpenAI as OpenAIClient
 except Exception:
@@ -134,16 +136,38 @@ IMAGE_QUALITY = os.getenv("IMAGE_QUALITY", "high")  # low | medium | high | auto
 IMAGE_BACKGROUND = os.getenv("IMAGE_BACKGROUND", "auto")  # transparent | auto
 IMAGE_FORMAT = os.getenv("IMAGE_FORMAT", "png")  # png | jpeg | webp
 
+# Local tools (time, dice, calculator, text, TTS)
+LOCAL_TOOLS_ENABLED = env_bool("LOCAL_TOOLS_ENABLED", True)
+TTS_ENABLED = env_bool("TTS_ENABLED", True)
+
 # Initialize OpenAI client if available
 openai_client = OpenAIClient(api_key=OPENAI_API_KEY) if (OPENAI_API_KEY and OpenAIClient) else None
 
 def build_system_prompt() -> str:
     base_prompt = PROMPT or "You are a helpful assistant."
-    return (
+    prompt = (
         f"{base_prompt}\n\n"
         "You are in a Discord conversation. Respond naturally and directly to the user's question. "
         "Do not repeat the message format or echo usernames in your response."
     )
+    if LOCAL_TOOLS_ENABLED:
+        prompt += (
+
+            "\n\nYou have access to local tools. Use these tags only when they fit the user's request. "
+            "Replace the tag with the exact input for the tool; the bot will run the tool and replace the tag with the result.\n"
+            "- [TIME]query[/TIME] — current time/date. Query: current, utc, day, or countdown YYYY-MM-DD.\n"
+            "- [DICE]notation[/DICE] — roll dice, e.g. 1d6, 2d20+3, 4d6.\n"
+            "- [CALC]expression[/CALC] — safe math, e.g. 2+3*4, sqrt(16).\n"
+            "- [TEXT]action|text[/TEXT] — text transform. Action: reverse, rot13, upper, lower, word_count, char_count.\n"
+        )
+        if TTS_ENABLED:
+            prompt += (
+                "- [TTS]phrase[/TTS] or [TTS]voice|phrase[/TTS] — speak this phrase (audio attached). "
+                "Only put your own short, appropriate reply in TTS. Voices: alba, marius, javert, jean, fantine, cosette, eponine, azelma. "
+                "Use when the user asks you to say/speak something, read aloud, or use voice. Keep the phrase short (one or two sentences).\n"
+            )
+        prompt += "Use tags inline in your reply where the result should appear. Do not use tools for every message—only when relevant."
+    return prompt
 
 
 def build_random_chat_prompt() -> str:
@@ -528,17 +552,37 @@ async def on_message(message):
                 current_chunk = ""
                 last_edit_time = time.monotonic()
                 
-        # Final edit with the complete message
+        # Final edit: run local tools (replace tags with results), then send
         if sent_message:
             final_content = full_response
+            tts_path = None
+            if LOCAL_TOOLS_ENABLED:
+                final_content, tts_path = await asyncio.to_thread(
+                    process_tool_tags, full_response, TTS_ENABLED
+                )
             if len(final_content) > DISCORD_MESSAGE_LIMIT:
                 final_content = final_content[:DISCORD_MESSAGE_LIMIT]
-            
-            # If the message is empty (e.g., an error occurred early)
             if not final_content.strip():
                 final_content = "I am sorry, I encountered an error and could not provide a response."
 
-            await sent_message.edit(content=final_content)
+            if tts_path and os.path.exists(tts_path):
+                # Discord cannot add attachment via edit; send new message with file and delete placeholder
+                try:
+                    filename = os.path.basename(tts_path)
+                    await sent_message.delete()
+                    await message.reply(final_content, file=discord.File(tts_path, filename=filename))
+                finally:
+                    try:
+                        os.remove(tts_path)
+                    except Exception:
+                        pass
+            else:
+                await sent_message.edit(content=final_content)
+                if tts_path:
+                    try:
+                        os.remove(tts_path)
+                    except Exception:
+                        pass
 
     except Exception as e:
         logger.exception("An error occurred during streaming")

@@ -17,8 +17,8 @@ COPY requirements.txt .
 # install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# copy bot code
-COPY bot.py .
+# copy bot code and local tools
+COPY bot.py local_tools.py .
 
 # run the bot
 CMD ["python", "-u", "bot.py"]
