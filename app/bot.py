@@ -456,10 +456,35 @@ async def on_message(message):
     question_text = f"{message.author.name} asks: {question_text}"
 
     if message.reference and message.reference.resolved:
-        # if a reply, use the message that was replied to as the context
+        # if a reply, use messages before + replied message (primary) and after (secondary, lower priority)
         replied_message = message.reference.resolved
-        context_for_grok = f"{replied_message.author.name}: {replied_message.content}"
-        logger.info("Context is a replied message: %s", replied_message.id)
+        replied_content = f"{replied_message.author.name}: {replied_message.content}"
+        # messages before the replied message (primary context)
+        before_messages = []
+        async for historic_msg in message.channel.history(limit=MESSAGE_HISTORY_LIMIT, before=replied_message):
+            before_messages.append(f"{historic_msg.author.name}: {historic_msg.content}")
+        if before_messages:
+            before_messages.reverse()
+            primary_context = "\n".join(before_messages) + "\n" + replied_content
+        else:
+            primary_context = replied_content
+        # messages after the replied message (secondary context, lower priority)
+        after_limit = max(5, MESSAGE_HISTORY_LIMIT // 3)
+        after_messages = []
+        async for historic_msg in message.channel.history(limit=after_limit, after=replied_message):
+            if historic_msg.id == message.id:
+                continue
+            after_messages.append(f"{historic_msg.author.name}: {historic_msg.content}")
+        if after_messages:
+            context_for_grok = (
+                "[Primary context - conversation leading up to the message you're replying to:]\n"
+                f"{primary_context}\n\n"
+                "[Additional context - messages after the replied message (lower priority):]\n"
+                + "\n".join(after_messages)
+            )
+        else:
+            context_for_grok = primary_context
+        logger.info("Context is reply mode: message %s, %s before, %s after", replied_message.id, len(before_messages), len(after_messages))
     else:
         # if not a reply, get recent messages as context
         logger.info("Context is message history from channel: %s", message.channel.name)
