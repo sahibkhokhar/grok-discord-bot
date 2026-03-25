@@ -7,7 +7,10 @@ import re
 import sys
 import tempfile
 import time
+from collections import defaultdict
+from datetime import date, datetime, timezone as tz
 from typing import Any, AsyncGenerator, Final
+from zoneinfo import ZoneInfo
 
 import discord
 import httpx
@@ -149,6 +152,32 @@ if _img_unlimited_raw.strip():
     except ValueError:
         logger.warning("Invalid user IDs in IMAGE_UNLIMITED_USER_IDS, ignoring.")
 
+# Block image generation only (comma-separated user IDs); rest of bot still works
+IMAGE_BLOCKED_USER_IDS: set[int] = set()
+_img_blocked_raw = os.getenv("IMAGE_BLOCKED_USER_IDS", "")
+if _img_blocked_raw.strip():
+    try:
+        IMAGE_BLOCKED_USER_IDS = set(
+            int(uid.strip()) for uid in _img_blocked_raw.split(",") if uid.strip()
+        )
+    except ValueError:
+        logger.warning("Invalid user IDs in IMAGE_BLOCKED_USER_IDS, ignoring.")
+
+# Calendar day for image rate limits (IANA name, e.g. America/New_York for US Eastern)
+_IMAGE_RATE_LIMIT_TZ_RAW = os.getenv("IMAGE_RATE_LIMIT_TIMEZONE", "America/New_York").strip()
+if not _IMAGE_RATE_LIMIT_TZ_RAW:
+    _IMAGE_RATE_LIMIT_TZ_RAW = "America/New_York"
+try:
+    IMAGE_RATE_LIMIT_ZONE = ZoneInfo(_IMAGE_RATE_LIMIT_TZ_RAW)
+    IMAGE_RATE_LIMIT_TIMEZONE_LABEL = _IMAGE_RATE_LIMIT_TZ_RAW
+except Exception:
+    logger.warning(
+        "Invalid IMAGE_RATE_LIMIT_TIMEZONE=%s; using America/New_York",
+        _IMAGE_RATE_LIMIT_TZ_RAW,
+    )
+    IMAGE_RATE_LIMIT_ZONE = ZoneInfo("America/New_York")
+    IMAGE_RATE_LIMIT_TIMEZONE_LABEL = "America/New_York"
+
 # Local tools (time, dice, calculator, text, TTS)
 LOCAL_TOOLS_ENABLED = env_bool("LOCAL_TOOLS_ENABLED", True)
 TTS_ENABLED = env_bool("TTS_ENABLED", True)
@@ -157,27 +186,29 @@ LOCAL_TOOLS_MAX_ROUNDS = max(1, min(32, env_int("LOCAL_TOOLS_MAX_ROUNDS", 8)))
 # Initialize OpenAI client if available
 openai_client = OpenAIClient(api_key=OPENAI_API_KEY) if (OPENAI_API_KEY and OpenAIClient) else None
 
-# --- Per-user image rate limiting (in-memory) ---
-from collections import defaultdict
-from datetime import datetime, timedelta, timezone as tz
-
+# --- Per-user image rate limiting (in-memory, per calendar day in IMAGE_RATE_LIMIT_ZONE) ---
 _image_usage: dict[int, list[datetime]] = defaultdict(list)
+
+
+def _image_usage_local_date(utc_moment: datetime) -> date:
+    if utc_moment.tzinfo is None:
+        utc_moment = utc_moment.replace(tzinfo=tz.utc)
+    return utc_moment.astimezone(IMAGE_RATE_LIMIT_ZONE).date()
 
 
 def check_image_rate_limit(user_id: int) -> tuple[bool, int]:
     """
     Returns (allowed, remaining).
-    Prunes entries older than 24 h, then checks the count.
+    Counts uses on the current calendar day in IMAGE_RATE_LIMIT_ZONE (not a rolling 24h window).
     """
     if user_id in IMAGE_UNLIMITED_USER_IDS:
         return True, -1
     if IMAGE_RATE_LIMIT_PER_DAY <= 0:
         return True, -1
 
-    now = datetime.now(tz.utc)
-    cutoff = now - timedelta(days=1)
-    entries = [t for t in _image_usage[user_id] if t > cutoff]
-    _image_usage[user_id] = entries
+    today = datetime.now(IMAGE_RATE_LIMIT_ZONE).date()
+    entries = _image_usage[user_id]
+    entries[:] = [t for t in entries if _image_usage_local_date(t) == today]
 
     remaining = max(0, IMAGE_RATE_LIMIT_PER_DAY - len(entries))
     return len(entries) < IMAGE_RATE_LIMIT_PER_DAY, remaining
@@ -665,12 +696,23 @@ async def on_message(message):
             )
             return
 
-        # Rate limit check
+        if message.author.id in IMAGE_BLOCKED_USER_IDS:
+            await message.reply(
+                "You can't use image generation here. You can still use the bot for everything else."
+            )
+            logger.info(
+                "Image-blocked user %s (ID: %s) tried image generation",
+                message.author.name,
+                message.author.id,
+            )
+            return
+
+        # Rate limit check (per calendar day in configured timezone)
         allowed, remaining = check_image_rate_limit(message.author.id)
         if not allowed:
             await message.reply(
-                f"You've used all **{IMAGE_RATE_LIMIT_PER_DAY}** image generations for today. "
-                "Try again in 24 hours!"
+                f"You've used all **{IMAGE_RATE_LIMIT_PER_DAY}** image generations for today "
+                f"(resets at midnight **{IMAGE_RATE_LIMIT_TIMEZONE_LABEL}** time)."
             )
             return
 
