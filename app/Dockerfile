@@ -18,7 +18,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # copy bot code and local tools
-COPY bot.py local_tools.py .
+COPY bot.py local_tools.py usage_tracking.py .
 
 # run the bot
 CMD ["python", "-u", "bot.py"]

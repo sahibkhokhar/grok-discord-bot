@@ -22,6 +22,15 @@ from local_tools import (
     build_responses_api_tools,
     dispatch_local_function,
 )
+from usage_tracking import (
+    USAGE_STATS_FILE,
+    UsageDelta,
+    estimate_tokens_from_text,
+    format_mystats_embed_body,
+    get_user_row,
+    leaderboard_rows,
+    record_usage,
+)
 
 try:
     from openai import OpenAI as OpenAIClient
@@ -182,6 +191,8 @@ except Exception:
 LOCAL_TOOLS_ENABLED = env_bool("LOCAL_TOOLS_ENABLED", True)
 TTS_ENABLED = env_bool("TTS_ENABLED", True)
 LOCAL_TOOLS_MAX_ROUNDS = max(1, min(32, env_int("LOCAL_TOOLS_MAX_ROUNDS", 8)))
+# Ask provider to include token usage on the final stream chunk (OpenAI-compatible)
+STREAM_USAGE_INCLUDE = env_bool("STREAM_USAGE_INCLUDE", True)
 
 # Initialize OpenAI client if available
 openai_client = OpenAIClient(api_key=OPENAI_API_KEY) if (OPENAI_API_KEY and OpenAIClient) else None
@@ -306,6 +317,7 @@ async def query_xai_api_stream(
     context_messages: str,
     question: str,
     system_prompt: str | None = None,
+    usage_holder: dict[str, Any] | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Asynchronously queries the Grok API with streaming enabled and yields content chunks.
@@ -333,11 +345,13 @@ async def query_xai_api_stream(
     ]
 
     # Prepare the payload
-    payload = {
+    payload: dict[str, Any] = {
         "messages": messages,
         "model": MODEL,
         "stream": True,
     }
+    if STREAM_USAGE_INCLUDE:
+        payload["stream_options"] = {"include_usage": True}
 
     # Add search parameters if enabled and "web" is mentioned in the question
     if SEARCH_ENABLED and "web" in question.lower():
@@ -352,24 +366,52 @@ async def query_xai_api_stream(
             "return_citations": True
         }
 
+    stream_payload = dict(payload)
+
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            async with client.stream("POST", url, headers=headers, json=payload) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if line.startswith('data: '):
-                        data_str = line[6:]
-                        if data_str.strip() == '[DONE]':
-                            break
-                        try:
-                            chunk = json.loads(data_str)
-                            if chunk.get("choices") and chunk["choices"][0].get("delta"):
-                                content = chunk["choices"][0]["delta"].get("content")
-                                if content:
-                                    yield content
-                        except (json.JSONDecodeError, IndexError, KeyError):
-                            logger.warning("Could not parse chunk from stream: %s", data_str)
+            for attempt in range(2):
+                async with client.stream(
+                    "POST", url, headers=headers, json=stream_payload
+                ) as response:
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError as e:
+                        if (
+                            attempt == 0
+                            and e.response.status_code == 400
+                            and STREAM_USAGE_INCLUDE
+                            and "stream_options" in stream_payload
+                        ):
+                            stream_payload.pop("stream_options", None)
+                            logger.warning(
+                                "xAI rejected stream_options; retrying stream without usage metadata"
+                            )
                             continue
+                        yield f"error communicating with grok api: HTTP {e.response.status_code}"
+                        return
+
+                    async for line in response.aiter_lines():
+                        if line.startswith("data: "):
+                            data_str = line[6:]
+                            if data_str.strip() == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data_str)
+                                if usage_holder is not None:
+                                    u = chunk.get("usage")
+                                    if isinstance(u, dict) and u:
+                                        usage_holder.clear()
+                                        usage_holder.update(u)
+                                if chunk.get("choices") and chunk["choices"][0].get("delta"):
+                                    content = chunk["choices"][0]["delta"].get("content")
+                                    if content:
+                                        yield content
+                            except (json.JSONDecodeError, IndexError, KeyError):
+                                logger.warning("Could not parse chunk from stream: %s", data_str)
+                                continue
+                    return
+
     except httpx.RequestError as e:
         yield f"error communicating with grok api: {e}"
     except Exception as e:
@@ -380,6 +422,7 @@ async def query_openai_api_stream(
     context_messages: str,
     question: str,
     system_prompt: str | None = None,
+    usage_holder: dict[str, Any] | None = None,
 ) -> AsyncGenerator[str, None]:
     """Asynchronously queries OpenAI Responses API with optional streaming."""
     if not openai_client:
@@ -406,11 +449,31 @@ async def query_openai_api_stream(
             # Bridge synchronous iterator into async generator
             await asyncio.sleep(0)  # yield to event loop
             try:
-                if hasattr(event, "type") and event.type == "response.output_text.delta":
+                et = getattr(event, "type", None)
+                if et == "response.output_text.delta":
                     delta = getattr(event, "delta", None)
                     if delta:
                         yield str(delta)
-                elif hasattr(event, "type") and event.type == "response.completed":
+                elif et == "response.completed" and usage_holder is not None:
+                    resp = getattr(event, "response", None)
+                    if resp:
+                        u = getattr(resp, "usage", None)
+                        if u is not None:
+                            ip = int(
+                                getattr(u, "input_tokens", None)
+                                or getattr(u, "prompt_tokens", None)
+                                or 0
+                            )
+                            op = int(
+                                getattr(u, "output_tokens", None)
+                                or getattr(u, "completion_tokens", None)
+                                or 0
+                            )
+                            usage_holder.clear()
+                            usage_holder["prompt_tokens"] = ip
+                            usage_holder["completion_tokens"] = op
+                    break
+                elif et == "response.completed":
                     break
             except Exception:
                 continue
@@ -422,14 +485,19 @@ async def query_ai_api_stream(
     context_messages: str,
     question: str,
     system_prompt: str | None = None,
+    usage_holder: dict[str, Any] | None = None,
 ) -> AsyncGenerator[str, None]:
     """Dispatch to the configured provider."""
     provider = AI_PROVIDER
     if provider == "openai":
-        async for chunk in query_openai_api_stream(context_messages, question, system_prompt):
+        async for chunk in query_openai_api_stream(
+            context_messages, question, system_prompt, usage_holder=usage_holder
+        ):
             yield chunk
     else:
-        async for chunk in query_xai_api_stream(context_messages, question, system_prompt):
+        async for chunk in query_xai_api_stream(
+            context_messages, question, system_prompt, usage_holder=usage_holder
+        ):
             yield chunk
 
 
@@ -462,10 +530,13 @@ def run_openai_agent_loop(
     context_messages: str,
     question: str,
     system_prompt: str,
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, dict[str, int]]:
     """Responses API tool loop; model sees real tool outputs before the final reply."""
     if not openai_client:
-        return "error: openai client not initialized - check your OPENAI_API_KEY", None
+        return "error: openai client not initialized - check your OPENAI_API_KEY", None, {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+        }
 
     tools = build_responses_api_tools(TTS_ENABLED)
     input_list: list[Any] = [
@@ -475,6 +546,8 @@ def run_openai_agent_loop(
         }
     ]
     tts_path: str | None = None
+    total_prompt = 0
+    total_completion = 0
 
     for round_i in range(LOCAL_TOOLS_MAX_ROUNDS):
         try:
@@ -488,7 +561,23 @@ def run_openai_agent_loop(
             )
         except Exception as e:
             logger.exception("OpenAI agent request failed")
-            return f"error communicating with openai api: {e}", tts_path
+            return f"error communicating with openai api: {e}", tts_path, {
+                "prompt_tokens": total_prompt,
+                "completion_tokens": total_completion,
+            }
+
+        u = getattr(resp, "usage", None)
+        if u is not None:
+            total_prompt += int(
+                getattr(u, "input_tokens", None)
+                or getattr(u, "prompt_tokens", None)
+                or 0
+            )
+            total_completion += int(
+                getattr(u, "output_tokens", None)
+                or getattr(u, "completion_tokens", None)
+                or 0
+            )
 
         output = list(getattr(resp, "output", []) or [])
         input_list = list(input_list)
@@ -497,7 +586,10 @@ def run_openai_agent_loop(
         calls = [x for x in output if getattr(x, "type", None) == "function_call"]
         if not calls:
             text = _openai_response_final_text(resp)
-            return (text if text else "(no response)"), tts_path
+            return (text if text else "(no response)"), tts_path, {
+                "prompt_tokens": total_prompt,
+                "completion_tokens": total_completion,
+            }
 
         logger.info("OpenAI agent tool round %s: %s call(s)", round_i + 1, len(calls))
         for item in calls:
@@ -515,17 +607,23 @@ def run_openai_agent_loop(
                 }
             )
 
-    return "error: too many tool rounds; try a simpler question.", tts_path
+    return "error: too many tool rounds; try a simpler question.", tts_path, {
+        "prompt_tokens": total_prompt,
+        "completion_tokens": total_completion,
+    }
 
 
 def run_xai_agent_loop(
     context_messages: str,
     question: str,
     system_prompt: str,
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, dict[str, int]]:
     """xAI chat completions tool loop (OpenAI-compatible messages + tools)."""
     if not GROK_API_KEY:
-        return "error: grok_api_key is not configured.", None
+        return "error: grok_api_key is not configured.", None, {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+        }
 
     tools = build_chat_completion_tools(TTS_ENABLED)
     messages: list[dict[str, Any]] = [
@@ -538,6 +636,8 @@ def run_xai_agent_loop(
         "Authorization": f"Bearer {GROK_API_KEY}",
     }
     tts_path: str | None = None
+    total_prompt = 0
+    total_completion = 0
 
     for round_i in range(LOCAL_TOOLS_MAX_ROUNDS):
         payload: dict[str, Any] = {
@@ -566,15 +666,29 @@ def run_xai_agent_loop(
                 data = response.json()
         except httpx.HTTPStatusError as e:
             logger.exception("xAI agent HTTP error")
-            return f"error communicating with grok api: {e}", tts_path
+            return f"error communicating with grok api: {e}", tts_path, {
+                "prompt_tokens": total_prompt,
+                "completion_tokens": total_completion,
+            }
         except Exception as e:
             logger.exception("xAI agent request failed")
-            return f"error communicating with grok api: {e}", tts_path
+            return f"error communicating with grok api: {e}", tts_path, {
+                "prompt_tokens": total_prompt,
+                "completion_tokens": total_completion,
+            }
 
         try:
             msg = data["choices"][0]["message"]
         except (KeyError, IndexError, TypeError):
-            return "error: unexpected response from grok api.", tts_path
+            return "error: unexpected response from grok api.", tts_path, {
+                "prompt_tokens": total_prompt,
+                "completion_tokens": total_completion,
+            }
+
+        usage = data.get("usage")
+        if isinstance(usage, dict):
+            total_prompt += int(usage.get("prompt_tokens") or 0)
+            total_completion += int(usage.get("completion_tokens") or 0)
 
         tool_calls = msg.get("tool_calls")
         if tool_calls:
@@ -593,9 +707,15 @@ def run_xai_agent_loop(
             continue
 
         content = (msg.get("content") or "").strip()
-        return (content if content else "(no response)"), tts_path
+        return (content if content else "(no response)"), tts_path, {
+            "prompt_tokens": total_prompt,
+            "completion_tokens": total_completion,
+        }
 
-    return "error: too many tool rounds; try a simpler question.", tts_path
+    return "error: too many tool rounds; try a simpler question.", tts_path, {
+        "prompt_tokens": total_prompt,
+        "completion_tokens": total_completion,
+    }
 
 
 def run_provider_agent_loop(
@@ -603,15 +723,22 @@ def run_provider_agent_loop(
     context_messages: str,
     question: str,
     system_prompt: str,
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, dict[str, int]]:
     if provider == "openai":
         return run_openai_agent_loop(context_messages, question, system_prompt)
     return run_xai_agent_loop(context_messages, question, system_prompt)
 
 
-async def generate_ai_response(context_messages: str, prompt: str, system_prompt: str | None = None) -> str:
+async def generate_ai_response(
+    context_messages: str,
+    prompt: str,
+    system_prompt: str | None = None,
+    usage_holder: dict[str, Any] | None = None,
+) -> str:
     full_response = ""
-    async for chunk in query_ai_api_stream(context_messages, prompt, system_prompt):
+    async for chunk in query_ai_api_stream(
+        context_messages, prompt, system_prompt, usage_holder=usage_holder
+    ):
         full_response += chunk
     return full_response.strip()
 
@@ -625,12 +752,173 @@ client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 random_chat_task: asyncio.Task | None = None
 
+
+async def _record_chat_usage_for_message(
+    user_id: int,
+    context: str,
+    question: str,
+    full_response: str,
+    usage: dict[str, Any],
+) -> None:
+    delta = UsageDelta()
+    delta.add_json_usage(usage)
+    if delta.prompt_tokens == 0 and delta.completion_tokens == 0:
+        fr = (full_response or "").strip()
+        if not fr or fr.lower().startswith("error"):
+            return
+        delta.prompt_tokens, _ = estimate_tokens_from_text(context + "\n" + question)
+        _, delta.completion_tokens = estimate_tokens_from_text(fr)
+    await record_usage(
+        user_id,
+        prompt_tokens=delta.prompt_tokens,
+        completion_tokens=delta.completion_tokens,
+    )
+
+
+@tree.command(name="pic", description="Generate an image with Grok Imagine (counts toward your daily quota).")
+@app_commands.describe(prompt="Describe the image to create")
+async def pic_slash(interaction: discord.Interaction, prompt: str) -> None:
+    if not IMAGE_GEN_ENABLED:
+        await interaction.response.send_message(
+            "Image generation is disabled on this bot.", ephemeral=True
+        )
+        return
+    if interaction.user.id in BLOCKED_USER_IDS:
+        await interaction.response.send_message(
+            "You cannot use this bot.", ephemeral=True
+        )
+        return
+    if interaction.user.id in IMAGE_BLOCKED_USER_IDS:
+        await interaction.response.send_message(
+            "You cannot use image generation here. Other bot features still work.",
+            ephemeral=True,
+        )
+        return
+
+    prompt_clean = prompt.strip()
+    if not prompt_clean:
+        await interaction.response.send_message(
+            'Please enter a prompt (for example: "a cat on a rainbow").',
+            ephemeral=True,
+        )
+        return
+
+    allowed, _remaining = check_image_rate_limit(interaction.user.id)
+    if not allowed:
+        await interaction.response.send_message(
+            f"You've used all **{IMAGE_RATE_LIMIT_PER_DAY}** image generations for today "
+            f"(resets at midnight **{IMAGE_RATE_LIMIT_TIMEZONE_LABEL}** time).",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer()
+    logger.info(
+        "Slash /pic for %s (%s): %s",
+        interaction.user.name,
+        interaction.user.id,
+        prompt_clean,
+    )
+
+    ch = interaction.channel
+    if ch is None:
+        await interaction.followup.send("❌ Could not access a channel for this interaction.")
+        return
+
+    async with ch.typing():
+        result = await asyncio.to_thread(generate_image, prompt_clean)
+
+    if "error" in result:
+        await interaction.followup.send(f"❌ Error generating image: {result['error']}")
+        return
+
+    record_image_use(interaction.user.id)
+    await record_usage(interaction.user.id, images=1)
+    _, remaining_after = check_image_rate_limit(interaction.user.id)
+
+    file_path = result.get("file_path")
+    filename = result.get("filename", "image.png")
+
+    footer_parts = [f"Requested by {interaction.user.name}"]
+    if remaining_after >= 0:
+        footer_parts.append(f"{remaining_after} generation(s) remaining today")
+
+    icon = interaction.user.display_avatar.url if interaction.user.display_avatar else None
+    embed = discord.Embed(
+        title="🎨 Generated Image",
+        description=f"**Prompt:** {prompt_clean}",
+        color=0x00FF00,
+    )
+    embed.set_image(url=f"attachment://{filename}")
+    embed.set_footer(text=" · ".join(footer_parts), icon_url=icon)
+
+    if file_path and os.path.exists(file_path):
+        try:
+            await interaction.followup.send(
+                embed=embed,
+                file=discord.File(file_path, filename=filename),
+            )
+        finally:
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+    else:
+        await interaction.followup.send("❌ Could not access the generated image file.")
+
+
+@tree.command(name="mystats", description="Your recorded Grok / OpenAI token usage and estimated cost.")
+async def mystats_slash(interaction: discord.Interaction) -> None:
+    row = await get_user_row(interaction.user.id)
+    title, desc = format_mystats_embed_body(row)
+    embed = discord.Embed(title=title, description=desc, color=0x5865F2)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@tree.command(name="usageleaderboard", description="Ranking by estimated API spend on this bot (all users).")
+@app_commands.describe(limit="How many places to show (1–25)")
+async def usage_leaderboard_slash(
+    interaction: discord.Interaction,
+    limit: int = 10,
+) -> None:
+    lim = max(1, min(25, int(limit)))
+    rows = await leaderboard_rows(lim)
+    if not rows:
+        embed = discord.Embed(
+            title="Usage leaderboard",
+            description="No usage recorded yet.",
+            color=0xFEE75C,
+        )
+        await interaction.response.send_message(embed=embed)
+        return
+
+    lines: list[str] = []
+    for i, (uid, row) in enumerate(rows, start=1):
+        u = interaction.client.get_user(uid)
+        label = u.name if u else f"User {uid}"
+        usd = float(row.get("estimated_cost_usd") or 0)
+        tt = int(row.get("total_tokens") or 0)
+        imgs = int(row.get("images") or 0)
+        lines.append(f"**{i}.** {label} — **${usd:.4f}** · {tt:,} tok · {imgs} img")
+
+    embed = discord.Embed(
+        title="Usage leaderboard",
+        description="\n".join(lines),
+        color=0xFEE75C,
+    )
+    embed.set_footer(
+        text="Sorted by estimated USD. Tune rates with env vars (see usage_tracking)."
+    )
+    await interaction.response.send_message(embed=embed)
+
+
 # on ready event
 @client.event
 async def on_ready():
     logger.info("Logged in as %s (id: %s)", client.user, client.user.id)
     logger.info("Bot is ready and listening for mentions.")
     logger.info("AI_PROVIDER=%s, IMAGE_GEN=%s", AI_PROVIDER, IMAGE_GEN_ENABLED)
+    logger.info("Usage stats persistence: %s", USAGE_STATS_FILE)
     if BLOCKED_USER_IDS:
         logger.info("Blocked users: %s user(s)", len(BLOCKED_USER_IDS))
     
@@ -683,87 +971,6 @@ async def on_message(message):
 
     if not question_text:
         await message.reply("It looks like you mentioned me but didn't ask a question after it.")
-        return
-
-    # Check if this is an image generation request
-    if IMAGE_GEN_ENABLED and "image" in question_text.lower():
-        image_prompt = re.sub(r'\bimage\b', '', question_text, flags=re.IGNORECASE).strip()
-
-        if not image_prompt:
-            await message.reply(
-                "Please provide a description for the image you want to generate. "
-                "Example: `@bot image a cat sitting on a rainbow`"
-            )
-            return
-
-        if message.author.id in IMAGE_BLOCKED_USER_IDS:
-            await message.reply(
-                "You can't use image generation here. You can still use the bot for everything else."
-            )
-            logger.info(
-                "Image-blocked user %s (ID: %s) tried image generation",
-                message.author.name,
-                message.author.id,
-            )
-            return
-
-        # Rate limit check (per calendar day in configured timezone)
-        allowed, remaining = check_image_rate_limit(message.author.id)
-        if not allowed:
-            await message.reply(
-                f"You've used all **{IMAGE_RATE_LIMIT_PER_DAY}** image generations for today "
-                f"(resets at midnight **{IMAGE_RATE_LIMIT_TIMEZONE_LABEL}** time)."
-            )
-            return
-
-        logger.info(
-            "Generating image for user %s (ID: %s) with prompt: %s",
-            message.author.name,
-            message.author.id,
-            image_prompt,
-        )
-
-        async with message.channel.typing():
-            result = await asyncio.to_thread(generate_image, image_prompt)
-
-        if "error" in result:
-            await message.reply(f"❌ Error generating image: {result['error']}")
-            return
-
-        record_image_use(message.author.id)
-        _, remaining_after = check_image_rate_limit(message.author.id)
-
-        file_path = result.get("file_path")
-        filename = result.get("filename", "image.png")
-
-        footer_parts = [f"Requested by {message.author.name}"]
-        if remaining_after >= 0:
-            footer_parts.append(f"{remaining_after} generation(s) remaining today")
-
-        embed = discord.Embed(
-            title="🎨 Generated Image",
-            description=f"**Prompt:** {image_prompt}",
-            color=0x00ff00,
-        )
-        embed.set_image(url=f"attachment://{filename}")
-        embed.set_footer(
-            text=" · ".join(footer_parts),
-            icon_url=message.author.avatar.url if message.author.avatar else None,
-        )
-
-        if file_path and os.path.exists(file_path):
-            try:
-                await message.reply(
-                    embed=embed,
-                    file=discord.File(file_path, filename=filename),
-                )
-            finally:
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
-        else:
-            await message.reply("❌ Could not access the generated image file.")
         return
 
     # Add the author's name to the question text
@@ -825,13 +1032,14 @@ async def on_message(message):
     last_edit_time = 0.0
     tts_path: str | None = None
     system_prompt = build_system_prompt()
+    usage_for_turn: dict[str, Any] = {}
 
     try:
         sent_message = await message.reply("🧠 Thinking...")
 
         if LOCAL_TOOLS_ENABLED:
             async with message.channel.typing():
-                full_response, tts_path = await asyncio.to_thread(
+                full_response, tts_path, usage_for_turn = await asyncio.to_thread(
                     run_provider_agent_loop,
                     AI_PROVIDER,
                     context_for_grok,
@@ -856,8 +1064,12 @@ async def on_message(message):
                 await sent_message.edit(content=preview + "...")
                 last_edit_time = time.monotonic()
         else:
+            usage_holder: dict[str, Any] = {}
             async for chunk in query_ai_api_stream(
-                context_for_grok, question_text, system_prompt
+                context_for_grok,
+                question_text,
+                system_prompt,
+                usage_holder=usage_holder,
             ):
                 full_response += chunk
                 current_chunk += chunk
@@ -873,6 +1085,7 @@ async def on_message(message):
                     await sent_message.edit(content=stream_display + "...")
                     current_chunk = ""
                     last_edit_time = time.monotonic()
+            usage_for_turn = dict(usage_holder)
 
         if sent_message:
             final_content = full_response
@@ -901,6 +1114,14 @@ async def on_message(message):
                         os.remove(tts_path)
                     except Exception:
                         pass
+
+            await _record_chat_usage_for_message(
+                message.author.id,
+                context_for_grok,
+                question_text,
+                full_response,
+                usage_for_turn,
+            )
 
     except Exception:
         logger.exception("An error occurred while generating the response")
