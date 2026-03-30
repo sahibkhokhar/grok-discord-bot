@@ -775,6 +775,34 @@ async def _record_chat_usage_for_message(
     )
 
 
+async def _resolve_user_display(
+    client: discord.Client,
+    guild: discord.Guild | None,
+    user_id: int,
+) -> str:
+    """Server nickname when in guild, else Discord global name / username (fetches if not cached)."""
+    if guild is not None:
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                member = None
+        if member is not None:
+            return member.display_name
+
+    user = client.get_user(user_id)
+    if user is None:
+        try:
+            user = await client.fetch_user(user_id)
+        except (discord.NotFound, discord.HTTPException):
+            return "Unknown user"
+
+    if user.global_name:
+        return user.global_name
+    return user.name
+
+
 @tree.command(name="pic", description="Generate an image with Grok Imagine (counts toward your daily quota).")
 @app_commands.describe(prompt="Describe the image to create")
 async def pic_slash(interaction: discord.Interaction, prompt: str) -> None:
@@ -892,10 +920,18 @@ async def usage_leaderboard_slash(
         await interaction.response.send_message(embed=embed)
         return
 
+    user_ids = [uid for uid, _ in rows]
+    labels = await asyncio.gather(
+        *[
+            _resolve_user_display(interaction.client, interaction.guild, uid)
+            for uid in user_ids
+        ]
+    )
+    id_to_label = dict(zip(user_ids, labels))
+
     lines: list[str] = []
     for i, (uid, row) in enumerate(rows, start=1):
-        u = interaction.client.get_user(uid)
-        label = u.name if u else f"User {uid}"
+        label = id_to_label.get(uid) or "Unknown user"
         usd = float(row.get("estimated_cost_usd") or 0)
         tt = int(row.get("total_tokens") or 0)
         imgs = int(row.get("images") or 0)
@@ -909,7 +945,10 @@ async def usage_leaderboard_slash(
     embed.set_footer(
         text="Sorted by estimated USD. Tune rates with env vars (see usage_tracking)."
     )
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(
+        embed=embed,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
 
 
 # on ready event
