@@ -98,6 +98,7 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano")
 
 # Shared behavior
 PROMPT = os.getenv("PROMPT")
+MENTIONS_DISABLED = env_bool("MENTIONS_DISABLED", False)
 SEARCH_ENABLED = env_bool("SEARCH_ENABLED", False)
 MAX_SEARCH_RESULTS = env_int("MAX_SEARCH_RESULTS", 5)
 SHOW_SOURCES = env_bool("SHOW_SOURCES", True)
@@ -999,6 +1000,9 @@ async def on_message(message):
         return
 
     if not (client.user and client.user.mentioned_in(message)):
+        return
+
+    if MENTIONS_DISABLED:
         return
 
     # bot is mentioned, now determine context
