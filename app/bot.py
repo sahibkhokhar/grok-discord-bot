@@ -98,6 +98,9 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano")
 
 # Shared behavior
 PROMPT = os.getenv("PROMPT")
+MENTIONS_DISABLED = env_bool("MENTIONS_DISABLED", False)
+LITE_MODE = env_bool("LITE_MODE", False)
+LITE_MODE_HISTORY_LIMIT = 5
 SEARCH_ENABLED = env_bool("SEARCH_ENABLED", False)
 MAX_SEARCH_RESULTS = env_int("MAX_SEARCH_RESULTS", 5)
 SHOW_SOURCES = env_bool("SHOW_SOURCES", True)
@@ -244,6 +247,8 @@ def build_system_prompt() -> str:
             "Do not use bracket tags like [TIME]…[/TIME]; use the functions instead. "
             "Do not call tools unless they help the user's request."
         )
+    if LITE_MODE:
+        prompt += "\n\nKeep your reply as short and concise as possible — one or two sentences at most."
     return prompt
 
 
@@ -1001,6 +1006,9 @@ async def on_message(message):
     if not (client.user and client.user.mentioned_in(message)):
         return
 
+    if MENTIONS_DISABLED:
+        return
+
     # bot is mentioned, now determine context
     context_for_grok = ""
     question_text = message.content
@@ -1050,7 +1058,8 @@ async def on_message(message):
         logger.info("Context is message history from channel: %s", message.channel.name)
         history_messages = []
         # fetch recent messages
-        async for historic_msg in message.channel.history(limit=MESSAGE_HISTORY_LIMIT, before=message):
+        history_limit = LITE_MODE_HISTORY_LIMIT if LITE_MODE else MESSAGE_HISTORY_LIMIT
+        async for historic_msg in message.channel.history(limit=history_limit, before=message):
             history_messages.append(f"{historic_msg.author.name}: {historic_msg.content}")
 
         if history_messages:
