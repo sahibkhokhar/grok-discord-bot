@@ -231,8 +231,11 @@ def check_image_rate_limit(user_id: int) -> tuple[bool, int]:
 def record_image_use(user_id: int) -> None:
     _image_usage[user_id].append(datetime.now(tz.utc))
 
-def build_system_prompt() -> str:
+def build_system_prompt(channel_id: int | None = None) -> str:
     base_prompt = PROMPT or "You are a helpful assistant."
+    persona = _channel_persona.get(channel_id) if channel_id else None
+    if persona:
+        base_prompt = f"{base_prompt}\n\nFor this channel, also: {persona}"
     prompt = (
         f"{base_prompt}\n\n"
         "You are in a Discord conversation. Respond naturally and directly to the user's question. "
@@ -758,6 +761,15 @@ client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 random_chat_task: asyncio.Task | None = None
 
+# ponytail: in-memory per-channel state, resets on restart. Persist only if that becomes annoying.
+_context_cutoff: dict[int, int] = {}  # channel_id -> snowflake; history before it is ignored
+_channel_persona: dict[int, str] = {}  # channel_id -> extra system prompt line
+
+
+def _cutoff(channel_id: int) -> discord.Object | None:
+    cid = _context_cutoff.get(channel_id)
+    return discord.Object(id=cid) if cid else None
+
 
 async def _record_chat_usage_for_message(
     user_id: int,
@@ -901,6 +913,63 @@ async def pic_slash(interaction: discord.Interaction, prompt: str) -> None:
         await interaction.followup.send("❌ Could not access the generated image file.")
 
 
+@tree.command(name="clear", description="Forget everything said in this channel before now.")
+async def clear_slash(interaction: discord.Interaction) -> None:
+    if interaction.channel_id is None:
+        await interaction.response.send_message("No channel here.", ephemeral=True)
+        return
+    _context_cutoff[interaction.channel_id] = interaction.id
+    await interaction.response.send_message(
+        f"🧹 Context cleared by {interaction.user.mention} — I only see messages from here on.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@tree.command(name="persona", description="Set how the bot acts in this channel (blank to reset).")
+@app_commands.describe(style='e.g. "talk like a pirate" — leave empty to go back to normal')
+async def persona_slash(interaction: discord.Interaction, style: str = "") -> None:
+    if interaction.channel_id is None:
+        await interaction.response.send_message("No channel here.", ephemeral=True)
+        return
+    style = style.strip()[:500]
+    if style:
+        _channel_persona[interaction.channel_id] = style
+        msg = f"🎭 Persona set: *{style}*"
+    else:
+        _channel_persona.pop(interaction.channel_id, None)
+        msg = "🎭 Persona reset to default."
+    await interaction.response.send_message(msg, allowed_mentions=discord.AllowedMentions.none())
+
+
+@tree.command(name="quota", description="How many image generations you have left today.")
+async def quota_slash(interaction: discord.Interaction) -> None:
+    _, remaining = check_image_rate_limit(interaction.user.id)
+    await interaction.response.send_message(
+        f"🎨 **{remaining}/{IMAGE_RATE_LIMIT_PER_DAY}** image generations left "
+        f"(resets at midnight {IMAGE_RATE_LIMIT_TIMEZONE_LABEL}).",
+        ephemeral=True,
+    )
+
+
+@tree.command(name="help", description="What this bot can do.")
+async def help_slash(interaction: discord.Interaction) -> None:
+    embed = discord.Embed(
+        title="How to use me",
+        description=(
+            f"Mention {client.user.mention if client.user else '@me'} with a question, "
+            "or reply to a message and mention me to talk about it.\n\n"
+            "**/clear** — forget everything before now in this channel\n"
+            "**/persona** — make me act differently here (pirate, hater, etc.)\n"
+            "**/pic** — generate an image\n"
+            "**/quota** — image generations left today\n"
+            "**/mystats** — your token usage and cost\n"
+            "**/usageleaderboard** — who's burning the most money"
+        ),
+        color=0x5865F2,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @tree.command(name="mystats", description="Your recorded Grok / OpenAI token usage and estimated cost.")
 async def mystats_slash(interaction: discord.Interaction) -> None:
     row = await get_user_row(interaction.user.id)
@@ -1030,7 +1099,12 @@ async def on_message(message):
         replied_content = f"{replied_message.author.name}: {replied_message.content}"
         # messages before the replied message (primary context)
         before_messages = []
-        async for historic_msg in message.channel.history(limit=MESSAGE_HISTORY_LIMIT, before=replied_message):
+        async for historic_msg in message.channel.history(
+            limit=MESSAGE_HISTORY_LIMIT,
+            before=replied_message,
+            after=_cutoff(message.channel.id),
+            oldest_first=False,
+        ):
             before_messages.append(f"{historic_msg.author.name}: {historic_msg.content}")
         if before_messages:
             before_messages.reverse()
@@ -1060,7 +1134,12 @@ async def on_message(message):
         history_messages = []
         # fetch recent messages
         history_limit = LITE_MODE_HISTORY_LIMIT if LITE_MODE else MESSAGE_HISTORY_LIMIT
-        async for historic_msg in message.channel.history(limit=history_limit, before=message):
+        async for historic_msg in message.channel.history(
+            limit=history_limit,
+            before=message,
+            after=_cutoff(message.channel.id),
+            oldest_first=False,
+        ):
             history_messages.append(f"{historic_msg.author.name}: {historic_msg.content}")
 
         if history_messages:
@@ -1080,7 +1159,7 @@ async def on_message(message):
     current_chunk = ""
     last_edit_time = 0.0
     tts_path: str | None = None
-    system_prompt = build_system_prompt()
+    system_prompt = build_system_prompt(message.channel.id)
     usage_for_turn: dict[str, Any] = {}
 
     try:
@@ -1214,7 +1293,11 @@ async def random_chat_loop() -> None:
 
             history_messages = []
             newest_message = None
-            async for historic_msg in channel.history(limit=MESSAGE_HISTORY_LIMIT):
+            async for historic_msg in channel.history(
+                limit=MESSAGE_HISTORY_LIMIT,
+                after=_cutoff(channel.id),
+                oldest_first=False,
+            ):
                 if newest_message is None:
                     newest_message = historic_msg
                 history_messages.append(f"{historic_msg.author.name}: {historic_msg.content}")
